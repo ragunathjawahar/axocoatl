@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use axocoatl_actor::{
     AgentActor, AgentBehavior, AgentRegistry, CoordinatorBehavior, DefaultAgentBehavior,
-    WorkerConfig,
+    WorkerConfig, DEFAULT_WORKER_BUDGET,
 };
 use axocoatl_config::{AgentRoleYaml, AxocoatlConfig};
 use axocoatl_coordination::{EventId, EventLattice, EventType, LatticeEvent};
@@ -573,6 +573,11 @@ impl AxocoatlDaemon {
                             name: w.name.clone(),
                             system_prompt: w.system_prompt.clone().unwrap_or_default(),
                             tools: w.tools.clone(),
+                            token_budget: w
+                                .token_budget
+                                .as_ref()
+                                .map(|b| b.per_execution)
+                                .unwrap_or(DEFAULT_WORKER_BUDGET),
                         });
                     }
                 }

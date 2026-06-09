@@ -20,9 +20,9 @@ use crate::default_behavior::DefaultAgentBehavior;
 use crate::error::AgentError;
 use crate::frontier_resolver::LlmFrontierResolver;
 
-/// Token budget assumed per worker when scoring auction bids (workers don't
-/// carry per-worker remaining budgets in this path yet).
-const WORKER_TOKEN_BUDGET: usize = 10_000;
+/// Budget assumed for a worker that declares no explicit `token_budget` —
+/// treated as ample so an unbounded worker isn't penalized in the auction.
+pub const DEFAULT_WORKER_BUDGET: usize = 100_000;
 
 /// Status of a worker agent managed by the coordinator.
 #[derive(Debug, Clone)]
@@ -48,6 +48,8 @@ pub struct WorkerConfig {
     pub name: String,
     pub system_prompt: String,
     pub tools: Vec<String>,
+    /// The worker's token budget, used as the budget signal in the auction.
+    pub token_budget: usize,
 }
 
 /// A unit of work the coordinator assigns to a worker: a name, a description,
@@ -315,19 +317,27 @@ impl AgentBehavior for CoordinatorBehavior {
         //    ad-hoc worker so behavior never regresses.
         let mut assignments: Vec<(AgentId, String, String)> = Vec::new();
         let mut available = self.worker_configs.clone();
+        let coord_id = self.agent_id.clone();
 
         for (i, subtask) in subtasks.iter().enumerate() {
             // The auction matches workers to the subtask's required tools; load
             // is 0 here since each pool worker is assigned at most once.
             let required_tools = &subtask.required_tools;
-            let description = &subtask.description;
+            // An ad-hoc worker granted exactly the subtask's required tools —
+            // used when the pool is empty or no pooled worker can cover the
+            // tools, so a subtask is never forced onto an unfit worker.
+            let make_adhoc = || WorkerConfig {
+                id: AgentId::new(format!("{coord_id}-worker-{i}")),
+                name: format!("Worker {i}"),
+                system_prompt: format!(
+                    "You are a worker agent. Your task: {}",
+                    subtask.description
+                ),
+                tools: required_tools.clone(),
+                token_budget: DEFAULT_WORKER_BUDGET,
+            };
             let worker_config = if available.is_empty() {
-                WorkerConfig {
-                    id: AgentId::new(format!("{}-worker-{}", self.agent_id, i)),
-                    name: format!("Worker {}", i),
-                    system_prompt: format!("You are a worker agent. Your task: {description}"),
-                    tools: required_tools.clone(),
-                }
+                make_adhoc()
             } else {
                 let bids: Vec<AgentBid> = available
                     .iter()
@@ -337,13 +347,22 @@ impl AgentBehavior for CoordinatorBehavior {
                             tools: wc.tools.clone(),
                             ..AgentConfig::default()
                         };
-                        compute_bid(&ac, required_tools, 0, WORKER_TOKEN_BUDGET)
+                        compute_bid(&ac, required_tools, 0, wc.token_budget)
                     })
                     .collect();
-                let idx = run_auction(bids)
-                    .and_then(|id| available.iter().position(|w| w.id == id))
-                    .unwrap_or(0);
-                available.remove(idx)
+                match run_auction(bids).and_then(|id| available.iter().position(|w| w.id == id)) {
+                    Some(idx) => available.remove(idx),
+                    None => {
+                        // No pooled worker has the required tools — spawn a
+                        // capable ad-hoc worker rather than an unfit one.
+                        tracing::warn!(
+                            coordinator = %coord_id,
+                            tools = ?required_tools,
+                            "No worker bid for subtask; spawning an ad-hoc worker with the required tools"
+                        );
+                        make_adhoc()
+                    }
+                }
             };
 
             let worker_id = self.spawn_worker(&worker_config).await?;
@@ -528,12 +547,14 @@ mod tests {
                 name: "W1".to_string(),
                 system_prompt: "worker".to_string(),
                 tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
             })
             .add_worker_config(WorkerConfig {
                 id: AgentId::new("w2"),
                 name: "W2".to_string(),
                 system_prompt: "worker".to_string(),
                 tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
             });
 
         coord.on_start(&coord_config()).await.unwrap();
@@ -577,18 +598,21 @@ mod tests {
                 name: "H1".to_string(),
                 system_prompt: "worker".to_string(),
                 tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
             })
             .add_worker_config(WorkerConfig {
                 id: AgentId::new("h2"),
                 name: "H2".to_string(),
                 system_prompt: "worker".to_string(),
                 tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
             })
             .add_worker_config(WorkerConfig {
                 id: AgentId::new("h3"),
                 name: "H3".to_string(),
                 system_prompt: "worker".to_string(),
                 tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
             });
 
         coord.on_start(&coord_config()).await.unwrap();
@@ -644,6 +668,7 @@ mod tests {
                 name: id.to_string(),
                 system_prompt: "worker".to_string(),
                 tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
             });
         }
 
@@ -653,5 +678,48 @@ mod tests {
         assert!(!out.content.is_empty());
         // p1 + the two LLM-resolved frontier subtasks.
         assert_eq!(coord.worker_results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn auction_routes_subtask_to_tool_matching_worker() {
+        // The single subtask requires the "special" tool; only the specialist
+        // worker has it, so the auction must route the subtask there.
+        let methods = r#"
+- task_pattern: "route"
+  preconditions: []
+  subtasks:
+    - name: "needs_special"
+      parameters:
+        tools: ["special"]
+      task_type: Primitive
+"#;
+        let planner = HtnPlanner::from_methods_yaml(methods).unwrap();
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+        let counter: Arc<dyn TokenCounter> = Arc::new(SimpleCounter);
+        let mut coord = CoordinatorBehavior::new(provider, counter)
+            .with_htn_methods(planner)
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("generalist"),
+                name: "Generalist".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
+            })
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("specialist"),
+                name: "Specialist".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec!["special".to_string()],
+                token_budget: DEFAULT_WORKER_BUDGET,
+            });
+
+        coord.on_start(&coord_config()).await.unwrap();
+        coord.execute(AgentInput::text("route")).await.unwrap();
+
+        assert_eq!(coord.worker_results.len(), 1);
+        assert_eq!(
+            coord.worker_results[0].worker_id,
+            AgentId::new("specialist")
+        );
     }
 }
