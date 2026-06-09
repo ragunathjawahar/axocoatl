@@ -691,6 +691,13 @@ impl AxocoatlDaemon {
     pub async fn dead_agents(&self) -> Vec<String> {
         let mut dead = Vec::new();
         for agent in &self.config.agents {
+            // Workers are spawned on demand by their coordinator, never as
+            // standalone supervised agents — so they're never "dead". (Treating
+            // them as dead makes the supervisor restart them forever, colliding
+            // with the coordinator's transient worker actors.)
+            if matches!(agent.role, AgentRoleYaml::Worker) {
+                continue;
+            }
             if !self.agent_registry.is_alive(&AgentId::new(&agent.id)).await {
                 dead.push(agent.id.clone());
             }
