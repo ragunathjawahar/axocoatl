@@ -8,10 +8,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 
-use axocoatl_actor::{AgentActor, AgentBehavior, AgentRegistry, DefaultAgentBehavior};
-use axocoatl_config::AxocoatlConfig;
+use axocoatl_actor::{
+    AgentActor, AgentBehavior, AgentRegistry, CoordinatorBehavior, DefaultAgentBehavior,
+    WorkerConfig,
+};
+use axocoatl_config::{AgentRoleYaml, AxocoatlConfig};
 use axocoatl_coordination::{EventId, EventLattice, EventType, LatticeEvent};
-use axocoatl_core::AgentId;
+use axocoatl_core::{AgentId, AgentRole};
 use axocoatl_isolation::session_sandbox::{ExecResult, SessionSandbox};
 use axocoatl_llm::ProviderRegistry;
 use axocoatl_mcp::approval::{McpApprovalGate, SharedApprovalGate};
@@ -263,6 +266,11 @@ impl AxocoatlDaemon {
         // 7. Spawn agents (deferred from earlier so the hook registry exists)
         let mut agent_handles = Vec::new();
         for agent_yaml in &config.agents {
+            // Workers are spawned on demand by their coordinator, not as
+            // standalone top-level agents — skip them in the main spawn loop.
+            if matches!(agent_yaml.role, AgentRoleYaml::Worker) {
+                continue;
+            }
             let handle = Self::spawn_agent(
                 agent_yaml,
                 &config,
@@ -282,6 +290,10 @@ impl AxocoatlDaemon {
         let event_lattice = Arc::new(EventLattice::new(256));
 
         for agent_yaml in &config.agents {
+            // Workers aren't lattice-activated — their coordinator drives them.
+            if matches!(agent_yaml.role, AgentRoleYaml::Worker) {
+                continue;
+            }
             let agent_id = AgentId::new(&agent_yaml.id);
             // Entry agents activate directly via execute_workflow(); downstream
             // agents activate on accumulated TaskCompleted signals. Threshold and
@@ -547,29 +559,51 @@ impl AxocoatlDaemon {
                 })?
         };
 
-        let mut behavior = DefaultAgentBehavior::new(provider, counter.clone())
-            .with_checkpoint_store(checkpoint_store.clone())
-            .with_tool_executor(tool_executor.clone())
-            .with_long_term_memory(long_term_memory.clone())
-            .with_hook_registry(hook_registry.clone());
+        // Select the behavior by role. A Coordinator orchestrates a pool of
+        // workers (the config's role:Worker agents), spawning and assigning them
+        // on demand; every other role runs the standard solo agent behavior.
+        let behavior: Box<dyn AgentBehavior> =
+            if matches!(agent_config.role, AgentRole::Coordinator) {
+                let mut coord = CoordinatorBehavior::new(provider, counter.clone())
+                    .with_tool_executor(tool_executor.clone());
+                for w in &config.agents {
+                    if matches!(w.role, AgentRoleYaml::Worker) {
+                        coord = coord.add_worker_config(WorkerConfig {
+                            id: AgentId::new(&w.id),
+                            name: w.name.clone(),
+                            system_prompt: w.system_prompt.clone().unwrap_or_default(),
+                            tools: w.tools.clone(),
+                        });
+                    }
+                }
+                Box::new(coord)
+            } else {
+                let mut behavior = DefaultAgentBehavior::new(provider, counter.clone())
+                    .with_checkpoint_store(checkpoint_store.clone())
+                    .with_tool_executor(tool_executor.clone())
+                    .with_long_term_memory(long_term_memory.clone())
+                    .with_hook_registry(hook_registry.clone());
 
-        // Tier 4 semantic memory — one store per agent, for cross-session
-        // recall. A failure here is non-fatal: the agent runs without it.
-        let data_dir = std::env::var("AXOCOATL_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-        match axocoatl_memory::SemanticMemory::new(
-            &agent_id.to_string(),
-            format!("{data_dir}/memory/semantic"),
-        ) {
-            Ok(sem) => behavior = behavior.with_semantic_memory(Arc::new(sem)),
-            Err(e) => {
-                tracing::warn!(agent = %agent_id, error = %e, "semantic memory unavailable")
-            }
-        }
+                // Tier 4 semantic memory — one store per agent, for cross-session
+                // recall. A failure here is non-fatal: the agent runs without it.
+                let data_dir =
+                    std::env::var("AXOCOATL_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+                match axocoatl_memory::SemanticMemory::new(
+                    &agent_id.to_string(),
+                    format!("{data_dir}/memory/semantic"),
+                ) {
+                    Ok(sem) => behavior = behavior.with_semantic_memory(Arc::new(sem)),
+                    Err(e) => {
+                        tracing::warn!(agent = %agent_id, error = %e, "semantic memory unavailable")
+                    }
+                }
+                Box::new(behavior)
+            };
 
         let (actor_ref, handle) = AgentActor::spawn(
             Some(agent_id.to_string()),
             AgentActor,
-            (agent_config, Box::new(behavior) as Box<dyn AgentBehavior>),
+            (agent_config, behavior),
         )
         .await
         .map_err(|e| DaemonError::AgentSpawn(format!("{}: {e}", agent_id)))?;

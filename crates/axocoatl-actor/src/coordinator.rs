@@ -1,5 +1,7 @@
-//! Coordinator behavior — orchestrator agent that spawns and manages worker agents.
-//! Uses HTN planner for task decomposition and auction for assignment.
+//! Coordinator behavior — an orchestrator agent that decomposes a goal into
+//! subtasks, spawns worker agents to run them in parallel, and synthesizes the
+//! results. Decomposition uses the LLM today; HTN planning and auction-based
+//! worker assignment are layered in when configured.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -317,5 +319,119 @@ impl AgentBehavior for CoordinatorBehavior {
         self.stop_all_workers().await;
         tracing::info!(coordinator = %self.agent_id, "Coordinator stopped");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use axocoatl_core::{AgentRole, ChatMessage};
+    use axocoatl_llm::{
+        ChatResponse, FinishReason, ProviderCapabilities, ProviderError, StreamEvent,
+    };
+    use axocoatl_token::TokenCounter;
+    use std::pin::Pin;
+    use tokio_stream::Stream;
+
+    /// Every chat returns a fixed two-subtask decomposition. The coordinator's
+    /// decompose call parses it into two subtasks; worker + synthesis calls just
+    /// echo it back — enough to exercise the full decompose→delegate→synthesize
+    /// path without a real model.
+    struct MockLlm;
+
+    #[async_trait]
+    impl LlmProvider for MockLlm {
+        fn provider_id(&self) -> &str {
+            "mock"
+        }
+        fn model_id(&self) -> &str {
+            "mock-model"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+        async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+            Ok(ChatResponse {
+                content: r#"[{"name":"sub_a","description":"do A"},{"name":"sub_b","description":"do B"}]"#
+                    .to_string(),
+                tool_calls: vec![],
+                finish_reason: FinishReason::Stop,
+                usage: TokenUsageStats::new(5, 5),
+                model: "mock-model".to_string(),
+                provider: "mock".to_string(),
+            })
+        }
+        async fn chat_stream(
+            &self,
+            _: ChatRequest,
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<StreamEvent, ProviderError>> + Send>>,
+            ProviderError,
+        > {
+            let events = vec![
+                Ok(StreamEvent::TextDelta {
+                    delta: "ok".to_string(),
+                }),
+                Ok(StreamEvent::Done {
+                    finish_reason: FinishReason::Stop,
+                }),
+            ];
+            Ok(Box::pin(tokio_stream::iter(events)))
+        }
+    }
+
+    struct SimpleCounter;
+    impl TokenCounter for SimpleCounter {
+        fn count_text(&self, text: &str) -> usize {
+            text.len() / 4 + 1
+        }
+        fn count_messages(&self, msgs: &[ChatMessage]) -> usize {
+            msgs.iter()
+                .map(|m| m.text_content().map_or(1, |t| self.count_text(t)))
+                .sum()
+        }
+        fn count_tool_definition(&self, j: &serde_json::Value) -> usize {
+            self.count_text(&j.to_string())
+        }
+    }
+
+    fn coord_config() -> AgentConfig {
+        AgentConfig {
+            id: AgentId::new("lead"),
+            name: "Lead".to_string(),
+            role: AgentRole::Coordinator,
+            ..AgentConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_decomposes_delegates_synthesizes() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+        let counter: Arc<dyn TokenCounter> = Arc::new(SimpleCounter);
+        let mut coord = CoordinatorBehavior::new(provider, counter)
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("w1"),
+                name: "W1".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+            })
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("w2"),
+                name: "W2".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+            });
+
+        coord.on_start(&coord_config()).await.unwrap();
+        let out = coord
+            .execute(AgentInput::text("build something"))
+            .await
+            .unwrap();
+
+        // The coordinator decomposed the goal, delegated to both workers in
+        // parallel, and synthesized a non-empty result.
+        assert!(!out.content.is_empty());
+        assert_eq!(coord.worker_results.len(), 2);
     }
 }
