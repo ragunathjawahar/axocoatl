@@ -95,6 +95,9 @@ pub struct CoordinatorBehavior {
     /// Optional HTN planner. When set, decompose_task tries symbolic
     /// decomposition (no LLM call) before falling back to the LLM.
     htn_planner: Option<HtnPlanner>,
+    /// Monotonic run counter — scopes worker actor names per run so repeated
+    /// executions of the same coordinator never collide in ractor's registry.
+    run_seq: u64,
 }
 
 impl CoordinatorBehavior {
@@ -111,6 +114,7 @@ impl CoordinatorBehavior {
             worker_handles: Vec::new(),
             worker_results: Vec::new(),
             htn_planner: None,
+            run_seq: 0,
         }
     }
 
@@ -147,10 +151,14 @@ impl CoordinatorBehavior {
             behavior = behavior.with_tool_executor(executor.clone());
         }
 
-        // Use spawn (not spawn_linked — ractor 0.15 doesn't expose spawn_linked on Actor trait directly)
-        // Worker crashes surface as errors from execute_agent in the JoinSet below.
+        // Run-scoped actor name so repeated runs of this coordinator never
+        // collide in ractor's global registry; the logical id (config.id) still
+        // keys active_workers and drives delegation.
+        // (spawn, not spawn_linked — ractor 0.15 doesn't expose spawn_linked on
+        // the Actor trait; worker crashes surface as errors from execute_agent.)
+        let actor_name = format!("{}#{}", config.id, self.run_seq);
         let (actor_ref, handle) = ractor::Actor::spawn(
-            Some(config.id.to_string()),
+            Some(actor_name),
             AgentActor,
             (agent_config, Box::new(behavior) as Box<dyn AgentBehavior>),
         )
@@ -169,11 +177,18 @@ impl CoordinatorBehavior {
         Ok(config.id.clone())
     }
 
-    /// Stop all active workers.
+    /// Stop all active workers and await full teardown so their actor names are
+    /// released from ractor's registry before the next run, then join the
+    /// spawned actor tasks so nothing is left running.
     async fn stop_all_workers(&mut self) {
         for (id, actor) in self.active_workers.drain() {
-            actor.stop(None);
+            let _ = actor
+                .stop_and_wait(None, Some(std::time::Duration::from_secs(10)))
+                .await;
             tracing::debug!(worker = %id, "Stopped worker");
+        }
+        for handle in self.worker_handles.drain(..) {
+            let _ = handle.await;
         }
     }
 
@@ -302,6 +317,31 @@ impl AgentBehavior for CoordinatorBehavior {
     }
 
     async fn execute(&mut self, input: AgentInput) -> Result<AgentOutput, AgentError> {
+        // Run one coordination pass, then ALWAYS tear the workers down — on
+        // success and on every error path — so no worker actor or task leaks.
+        let result = self.run_once(input).await;
+        self.stop_all_workers().await;
+        result
+    }
+
+    async fn on_stop(&mut self) -> Result<(), AgentError> {
+        self.stop_all_workers().await;
+        tracing::info!(coordinator = %self.agent_id, "Coordinator stopped");
+        Ok(())
+    }
+}
+
+impl CoordinatorBehavior {
+    /// One coordination pass: decompose, assign each subtask to a worker by
+    /// auction, run the workers in parallel, and synthesize their results.
+    /// Worker teardown is the caller's responsibility — [`execute`] always tears
+    /// down afterward, on success and on every error path.
+    async fn run_once(&mut self, input: AgentInput) -> Result<AgentOutput, AgentError> {
+        // A fresh run: bump the run sequence (scopes worker actor names so
+        // repeated runs never collide) and clear the previous run's results.
+        self.run_seq += 1;
+        self.worker_results.clear();
+
         // 1. Decompose the task
         let subtasks = self.decompose_task(&input.content).await?;
 
@@ -437,20 +477,11 @@ impl AgentBehavior for CoordinatorBehavior {
 
         total_usage.merge(&response.usage);
 
-        // 5. Clean up workers
-        self.stop_all_workers().await;
-
         Ok(AgentOutput {
             content: response.content,
             tool_calls: Vec::new(),
             token_usage: total_usage,
         })
-    }
-
-    async fn on_stop(&mut self) -> Result<(), AgentError> {
-        self.stop_all_workers().await;
-        tracing::info!(coordinator = %self.agent_id, "Coordinator stopped");
-        Ok(())
     }
 }
 
@@ -721,5 +752,37 @@ mod tests {
             coord.worker_results[0].worker_id,
             AgentId::new("specialist")
         );
+    }
+
+    #[tokio::test]
+    async fn coordinator_runs_repeatedly_without_collision() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+        let counter: Arc<dyn TokenCounter> = Arc::new(SimpleCounter);
+        let mut coord = CoordinatorBehavior::new(provider, counter)
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("rep_a"),
+                name: "A".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
+            })
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("rep_b"),
+                name: "B".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
+            });
+        coord.on_start(&coord_config()).await.unwrap();
+
+        // Two runs on the SAME coordinator instance must both succeed — the
+        // run-scoped actor names and stop_and_wait teardown prevent a registry
+        // collision on the second run.
+        let first = coord.execute(AgentInput::text("first")).await;
+        assert!(first.is_ok(), "first run failed: {first:?}");
+        let second = coord.execute(AgentInput::text("second")).await;
+        assert!(second.is_ok(), "second run failed: {second:?}");
+        // worker_results reflects only the latest run (cleared each run).
+        assert_eq!(coord.worker_results.len(), 2);
     }
 }
