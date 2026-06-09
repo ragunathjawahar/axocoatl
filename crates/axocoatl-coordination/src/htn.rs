@@ -19,7 +19,7 @@ pub enum HtnTaskType {
 }
 
 /// A decomposition method: how to break a compound task into primitives.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecompositionMethod {
     pub task_pattern: String,
     pub preconditions: Vec<Condition>,
@@ -27,7 +27,7 @@ pub struct DecompositionMethod {
 }
 
 /// A simple precondition check.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Condition {
     pub key: String,
     pub expected: serde_json::Value,
@@ -74,6 +74,18 @@ impl HtnPlanner {
             methods: Vec::new(),
             state: HashMap::new(),
         }
+    }
+
+    /// Build a planner from a YAML methods document — a list of
+    /// `{ task_pattern, preconditions, subtasks }`. Used to load a workflow's
+    /// `htn_methods_file`.
+    pub fn from_methods_yaml(yaml: &str) -> Result<Self, String> {
+        let methods: Vec<DecompositionMethod> =
+            serde_yaml::from_str(yaml).map_err(|e| format!("parsing HTN methods: {e}"))?;
+        Ok(Self {
+            methods,
+            state: HashMap::new(),
+        })
     }
 
     /// Register a decomposition method.
@@ -263,6 +275,27 @@ mod tests {
         let plan = planner.plan(compound("unknown_task"));
         assert!(plan.primitives.is_empty());
         assert_eq!(plan.llm_frontiers.len(), 1);
+    }
+
+    #[test]
+    fn from_methods_yaml_parses_and_decomposes() {
+        let yaml = r#"
+- task_pattern: "build_app"
+  preconditions: []
+  subtasks:
+    - name: "design"
+      parameters: {}
+      task_type: Primitive
+    - name: "implement"
+      parameters: {}
+      task_type: Primitive
+"#;
+        let planner = HtnPlanner::from_methods_yaml(yaml).unwrap();
+        let plan = planner.plan(compound("build_app"));
+        assert_eq!(plan.primitives.len(), 2);
+        assert!(plan.llm_frontiers.is_empty());
+        assert_eq!(plan.primitives[0].name, "design");
+        assert_eq!(plan.primitives[1].name, "implement");
     }
 
     #[test]

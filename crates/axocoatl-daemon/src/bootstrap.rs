@@ -576,6 +576,32 @@ impl AxocoatlDaemon {
                         });
                     }
                 }
+                // Load HTN decomposition methods from this coordinator's
+                // workflow, if it declares an htn_methods_file. Non-fatal: on any
+                // failure the coordinator falls back to LLM decomposition.
+                if let Some(path) = config
+                    .workflows
+                    .iter()
+                    .find(|wf| {
+                        wf.entry_point.as_deref() == Some(agent_yaml.id.as_str())
+                            || wf.agents.iter().any(|a| a == &agent_yaml.id)
+                    })
+                    .and_then(|wf| wf.htn_methods_file.as_deref())
+                {
+                    match std::fs::read_to_string(path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| axocoatl_coordination::HtnPlanner::from_methods_yaml(&s))
+                    {
+                        Ok(planner) => {
+                            tracing::info!(agent = %agent_id, file = %path, "Loaded HTN methods");
+                            coord = coord.with_htn_methods(planner);
+                        }
+                        Err(e) => tracing::warn!(
+                            agent = %agent_id, file = %path, error = %e,
+                            "HTN methods unavailable; coordinator uses LLM decomposition"
+                        ),
+                    }
+                }
                 Box::new(coord)
             } else {
                 let mut behavior = DefaultAgentBehavior::new(provider, counter.clone())

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axocoatl_coordination::{HtnPlanner, HtnTask, HtnTaskType};
 use axocoatl_core::{AgentConfig, AgentId, AgentInput, AgentOutput, TokenUsageStats};
 use axocoatl_llm::{ChatRequest, LlmProvider};
 use axocoatl_token::{TokenCounter, TokenTracker};
@@ -73,6 +74,9 @@ pub struct CoordinatorBehavior {
     worker_handles: Vec<tokio::task::JoinHandle<()>>,
     /// Collected results from workers.
     worker_results: Vec<WorkerResult>,
+    /// Optional HTN planner. When set, decompose_task tries symbolic
+    /// decomposition (no LLM call) before falling back to the LLM.
+    htn_planner: Option<HtnPlanner>,
 }
 
 impl CoordinatorBehavior {
@@ -88,6 +92,7 @@ impl CoordinatorBehavior {
             active_workers: HashMap::new(),
             worker_handles: Vec::new(),
             worker_results: Vec::new(),
+            htn_planner: None,
         }
     }
 
@@ -99,6 +104,13 @@ impl CoordinatorBehavior {
     /// Add a worker configuration. Workers with these configs can be spawned on demand.
     pub fn add_worker_config(mut self, config: WorkerConfig) -> Self {
         self.worker_configs.push(config);
+        self
+    }
+
+    /// Attach an HTN planner. When set, `decompose_task` tries symbolic
+    /// decomposition (no LLM call) before falling back to the LLM.
+    pub fn with_htn_methods(mut self, planner: HtnPlanner) -> Self {
+        self.htn_planner = Some(planner);
         self
     }
 
@@ -149,6 +161,38 @@ impl CoordinatorBehavior {
 
     /// Decompose a task into subtasks using the LLM.
     async fn decompose_task(&self, task: &str) -> Result<Vec<(String, String)>, AgentError> {
+        // Try symbolic HTN decomposition first. If methods are loaded and the
+        // task reduces to a fully-primitive plan, use it directly — no LLM call.
+        if let Some(planner) = &self.htn_planner {
+            let root = HtnTask {
+                name: task.to_string(),
+                parameters: HashMap::new(),
+                task_type: HtnTaskType::Compound,
+            };
+            let plan = planner.plan(root);
+            if !plan.primitives.is_empty() && plan.llm_frontiers.is_empty() {
+                tracing::info!(
+                    coordinator = %self.agent_id,
+                    subtasks = plan.primitives.len(),
+                    "Decomposed via HTN (no LLM call)"
+                );
+                return Ok(plan
+                    .primitives
+                    .into_iter()
+                    .map(|t| {
+                        let desc = t
+                            .parameters
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| t.name.clone());
+                        (t.name, desc)
+                    })
+                    .collect());
+            }
+        }
+
+        // Otherwise fall back to LLM decomposition.
         let decompose_prompt = format!(
             "You are a task decomposition engine. Break the following task into 2-5 independent subtasks.\n\
             Return ONLY a JSON array of objects with 'name' and 'description' fields.\n\
@@ -433,5 +477,58 @@ mod tests {
         // parallel, and synthesized a non-empty result.
         assert!(!out.content.is_empty());
         assert_eq!(coord.worker_results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn coordinator_uses_htn_when_methods_loaded() {
+        // The HTN method decomposes the goal into THREE subtasks; the LLM mock
+        // would return only two. Three workers proves HTN was used for
+        // decomposition (no LLM decompose call).
+        let methods = r#"
+- task_pattern: "build something"
+  preconditions: []
+  subtasks:
+    - name: "htn_a"
+      parameters: {}
+      task_type: Primitive
+    - name: "htn_b"
+      parameters: {}
+      task_type: Primitive
+    - name: "htn_c"
+      parameters: {}
+      task_type: Primitive
+"#;
+        let planner = HtnPlanner::from_methods_yaml(methods).unwrap();
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+        let counter: Arc<dyn TokenCounter> = Arc::new(SimpleCounter);
+        let mut coord = CoordinatorBehavior::new(provider, counter)
+            .with_htn_methods(planner)
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("h1"),
+                name: "H1".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+            })
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("h2"),
+                name: "H2".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+            })
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("h3"),
+                name: "H3".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+            });
+
+        coord.on_start(&coord_config()).await.unwrap();
+        let out = coord
+            .execute(AgentInput::text("build something"))
+            .await
+            .unwrap();
+
+        assert!(!out.content.is_empty());
+        assert_eq!(coord.worker_results.len(), 3);
     }
 }

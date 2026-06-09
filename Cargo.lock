@@ -257,6 +257,7 @@ version = "0.1.1"
 dependencies = [
  "async-trait",
  "axocoatl-config",
+ "axocoatl-coordination",
  "axocoatl-core",
  "axocoatl-llm",
  "axocoatl-memory",
@@ -325,6 +326,7 @@ dependencies = [
  "ractor",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
