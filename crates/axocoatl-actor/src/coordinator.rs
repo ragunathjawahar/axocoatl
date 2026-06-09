@@ -1,7 +1,9 @@
 //! Coordinator behavior — an orchestrator agent that decomposes a goal into
-//! subtasks, spawns worker agents to run them in parallel, and synthesizes the
-//! results. Decomposition uses the LLM today; HTN planning and auction-based
-//! worker assignment are layered in when configured.
+//! subtasks, assigns each to a worker agent, runs them in parallel, and
+//! synthesizes the results. Decomposition prefers the symbolic HTN planner
+//! (resolving any LLM frontiers task-by-task) and uses whole-goal LLM
+//! decomposition only when no planner is configured; workers are chosen by a
+//! capability/budget auction.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use crate::actor_impl::{execute_agent, AgentActor, AgentMessage};
 use crate::behavior::AgentBehavior;
 use crate::default_behavior::DefaultAgentBehavior;
 use crate::error::AgentError;
+use crate::frontier_resolver::LlmFrontierResolver;
 
 /// Token budget assumed per worker when scoring auction bids (workers don't
 /// carry per-worker remaining budgets in this path yet).
@@ -45,6 +48,15 @@ pub struct WorkerConfig {
     pub name: String,
     pub system_prompt: String,
     pub tools: Vec<String>,
+}
+
+/// A unit of work the coordinator assigns to a worker: a name, a description,
+/// and the tool names it requires (used by the auction to match workers).
+#[derive(Debug, Clone)]
+pub struct Subtask {
+    pub name: String,
+    pub description: String,
+    pub required_tools: Vec<String>,
 }
 
 /// Result of a worker's task execution.
@@ -163,77 +175,108 @@ impl CoordinatorBehavior {
         }
     }
 
-    /// Decompose a task into subtasks using the LLM.
-    async fn decompose_task(&self, task: &str) -> Result<Vec<(String, String)>, AgentError> {
-        // Try symbolic HTN decomposition first. If methods are loaded and the
-        // task reduces to a fully-primitive plan, use it directly — no LLM call.
+    /// Decompose a goal into subtasks. Prefers the symbolic HTN planner: it
+    /// plans, resolves any LLM frontiers (decomposing only those tasks with the
+    /// model, not the whole goal), and errors if the plan can't be made fully
+    /// primitive. Only when no planner is configured does it decompose the whole
+    /// goal with the LLM. Either way, an empty decomposition is an error.
+    async fn decompose_task(&self, task: &str) -> Result<Vec<Subtask>, AgentError> {
         if let Some(planner) = &self.htn_planner {
             let root = HtnTask {
                 name: task.to_string(),
                 parameters: HashMap::new(),
                 task_type: HtnTaskType::Compound,
             };
-            let plan = planner.plan(root);
-            if !plan.primitives.is_empty() && plan.llm_frontiers.is_empty() {
-                tracing::info!(
-                    coordinator = %self.agent_id,
-                    subtasks = plan.primitives.len(),
-                    "Decomposed via HTN (no LLM call)"
-                );
-                return Ok(plan
-                    .primitives
-                    .into_iter()
-                    .map(|t| {
-                        let desc = t
-                            .parameters
-                            .get("description")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| t.name.clone());
-                        (t.name, desc)
-                    })
-                    .collect());
+            // resolve_frontiers takes &mut self; clone so the shared planner is
+            // left untouched across runs.
+            let mut planner = planner.clone();
+            let resolver = LlmFrontierResolver::new(self.provider.clone());
+            let plan = planner
+                .resolve_frontiers(root, &resolver, 4)
+                .await
+                .map_err(AgentError::Internal)?;
+            if !plan.llm_frontiers.is_empty() {
+                return Err(AgentError::Internal(format!(
+                    "HTN planning left {} task(s) unresolved after frontier resolution",
+                    plan.llm_frontiers.len()
+                )));
             }
+            let subtasks: Vec<Subtask> = plan
+                .primitives
+                .into_iter()
+                .map(|t| Subtask {
+                    description: t
+                        .parameters
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| t.name.clone()),
+                    required_tools: t.required_tools(),
+                    name: t.name,
+                })
+                .collect();
+            if subtasks.is_empty() {
+                return Err(AgentError::Internal(
+                    "HTN planning produced no subtasks".to_string(),
+                ));
+            }
+            tracing::info!(
+                coordinator = %self.agent_id,
+                subtasks = subtasks.len(),
+                "Decomposed via HTN"
+            );
+            return Ok(subtasks);
         }
 
-        // Otherwise fall back to LLM decomposition.
+        // No planner configured — decompose the whole goal with the LLM.
         let decompose_prompt = format!(
-            "You are a task decomposition engine. Break the following task into 2-5 independent subtasks.\n\
-            Return ONLY a JSON array of objects with 'name' and 'description' fields.\n\
-            Do not include any other text.\n\n\
-            Task: {task}"
+            "You are a task decomposition engine. Break the following task into 2-5 \
+             independent subtasks.\n\
+             Return ONLY a JSON array of objects with 'name', 'description', and 'tools' \
+             fields ('tools' is an array of tool names the subtask needs, [] if none).\n\
+             Do not include any other text.\n\n\
+             Task: {task}"
         );
-
         let request = ChatRequest::with_system(
             "You decompose tasks into subtasks. Return only valid JSON.",
             decompose_prompt,
         );
-
         let response = self
             .provider
             .chat(request)
             .await
             .map_err(|e| AgentError::Provider(e.to_string()))?;
 
-        // Parse the JSON response
-        let subtasks: Vec<serde_json::Value> = serde_json::from_str(&response.content)
-            .unwrap_or_else(|_| {
-                // Fallback: treat the whole task as a single subtask
-                vec![serde_json::json!({
-                    "name": "main_task",
-                    "description": task
-                })]
-            });
-
-        Ok(subtasks
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(response.content.trim())
+            .map_err(|e| {
+                AgentError::Internal(format!("task decomposition returned invalid JSON: {e}"))
+            })?;
+        let subtasks: Vec<Subtask> = parsed
             .into_iter()
             .map(|s| {
-                (
-                    s["name"].as_str().unwrap_or("task").to_string(),
-                    s["description"].as_str().unwrap_or(task).to_string(),
-                )
+                let required_tools = s
+                    .get("tools")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Subtask {
+                    name: s["name"].as_str().unwrap_or("task").to_string(),
+                    description: s["description"].as_str().unwrap_or(task).to_string(),
+                    required_tools,
+                }
             })
-            .collect())
+            .collect();
+        if subtasks.is_empty() {
+            return Err(AgentError::Internal(
+                "task decomposition produced no subtasks".to_string(),
+            ));
+        }
+        Ok(subtasks)
     }
 }
 
@@ -273,16 +316,17 @@ impl AgentBehavior for CoordinatorBehavior {
         let mut assignments: Vec<(AgentId, String, String)> = Vec::new();
         let mut available = self.worker_configs.clone();
 
-        for (i, (name, description)) in subtasks.iter().enumerate() {
-            // Subtasks carry no tool requirements yet, so the auction ranks by
-            // budget (load is 0 here since each worker is used at most once).
-            let required_tools: Vec<String> = Vec::new();
+        for (i, subtask) in subtasks.iter().enumerate() {
+            // The auction matches workers to the subtask's required tools; load
+            // is 0 here since each pool worker is assigned at most once.
+            let required_tools = &subtask.required_tools;
+            let description = &subtask.description;
             let worker_config = if available.is_empty() {
                 WorkerConfig {
                     id: AgentId::new(format!("{}-worker-{}", self.agent_id, i)),
                     name: format!("Worker {}", i),
                     system_prompt: format!("You are a worker agent. Your task: {description}"),
-                    tools: Vec::new(),
+                    tools: required_tools.clone(),
                 }
             } else {
                 let bids: Vec<AgentBid> = available
@@ -293,7 +337,7 @@ impl AgentBehavior for CoordinatorBehavior {
                             tools: wc.tools.clone(),
                             ..AgentConfig::default()
                         };
-                        compute_bid(&ac, &required_tools, 0, WORKER_TOKEN_BUDGET)
+                        compute_bid(&ac, required_tools, 0, WORKER_TOKEN_BUDGET)
                     })
                     .collect();
                 let idx = run_auction(bids)
@@ -303,7 +347,7 @@ impl AgentBehavior for CoordinatorBehavior {
             };
 
             let worker_id = self.spawn_worker(&worker_config).await?;
-            assignments.push((worker_id, name.clone(), description.clone()));
+            assignments.push((worker_id, subtask.name.clone(), subtask.description.clone()));
         }
 
         // 3. Delegate tasks to workers IN PARALLEL
@@ -571,5 +615,43 @@ mod tests {
         assert!(!out.content.is_empty());
         // MockLlm decomposed into two subtasks → two ad-hoc workers.
         assert_eq!(coord.worker_results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn coordinator_resolves_htn_frontier_via_llm() {
+        // The method for "root" yields one primitive (p1) and one compound task
+        // (needs_llm) with no method — a frontier. resolve_frontiers asks the LLM
+        // (MockLlm → two subtasks) to decompose just that task, so the final plan
+        // is fully primitive: p1 + the two resolved subtasks = 3.
+        let methods = r#"
+- task_pattern: "root"
+  preconditions: []
+  subtasks:
+    - name: "p1"
+      parameters: {}
+      task_type: Primitive
+    - name: "needs_llm"
+      parameters: {}
+      task_type: Compound
+"#;
+        let planner = HtnPlanner::from_methods_yaml(methods).unwrap();
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+        let counter: Arc<dyn TokenCounter> = Arc::new(SimpleCounter);
+        let mut coord = CoordinatorBehavior::new(provider, counter).with_htn_methods(planner);
+        for id in ["r1", "r2", "r3"] {
+            coord = coord.add_worker_config(WorkerConfig {
+                id: AgentId::new(id),
+                name: id.to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+            });
+        }
+
+        coord.on_start(&coord_config()).await.unwrap();
+        let out = coord.execute(AgentInput::text("root")).await.unwrap();
+
+        assert!(!out.content.is_empty());
+        // p1 + the two LLM-resolved frontier subtasks.
+        assert_eq!(coord.worker_results.len(), 3);
     }
 }
