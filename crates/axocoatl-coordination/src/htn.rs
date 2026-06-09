@@ -10,6 +10,24 @@ pub struct HtnTask {
     pub task_type: HtnTaskType,
 }
 
+impl HtnTask {
+    /// The tool names this task requires, read from `parameters["tools"]`
+    /// (a JSON array of strings). Empty when the key is absent or not an array
+    /// of strings — methods that don't constrain tools simply impose none.
+    pub fn required_tools(&self) -> Vec<String> {
+        self.parameters
+            .get("tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HtnTaskType {
     /// Directly executable (maps to a tool or agent action).
@@ -63,6 +81,7 @@ impl Default for HtnPlan {
 }
 
 /// The symbolic planner — resolves tasks without LLM calls when methods are available.
+#[derive(Clone)]
 pub struct HtnPlanner {
     methods: Vec<DecompositionMethod>,
     state: HashMap<String, serde_json::Value>,
@@ -267,6 +286,23 @@ mod tests {
         let plan = planner.plan(primitive("do_thing"));
         assert_eq!(plan.primitives.len(), 1);
         assert!(plan.llm_frontiers.is_empty());
+    }
+
+    #[test]
+    fn required_tools_reads_parameters() {
+        let mut params = HashMap::new();
+        params.insert(
+            "tools".to_string(),
+            serde_json::json!(["web_search", "http_client"]),
+        );
+        let task = HtnTask {
+            name: "search".to_string(),
+            parameters: params,
+            task_type: HtnTaskType::Primitive,
+        };
+        assert_eq!(task.required_tools(), vec!["web_search", "http_client"]);
+        // Absent → no constraint.
+        assert!(primitive("x").required_tools().is_empty());
     }
 
     #[test]
