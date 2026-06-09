@@ -11,9 +11,10 @@ use std::sync::Arc;
 use axocoatl_coordination::{compute_bid, run_auction, AgentBid, HtnPlanner, HtnTask, HtnTaskType};
 use axocoatl_core::{AgentConfig, AgentId, AgentInput, AgentOutput, TokenUsageStats};
 use axocoatl_llm::{ChatRequest, LlmProvider};
-use axocoatl_memory::{CheckpointStore, LongTermMemory, SemanticMemory};
+use axocoatl_memory::{AgentCheckpoint, CheckpointStore, LongTermMemory, SemanticMemory};
 use axocoatl_token::{TokenCounter, TokenTracker};
 use axocoatl_tools::{HookRegistry, ToolExecutor};
+use serde::{Deserialize, Serialize};
 
 use crate::actor_impl::{execute_agent, AgentActor, AgentMessage};
 use crate::behavior::AgentBehavior;
@@ -70,6 +71,32 @@ pub struct WorkerResult {
     pub output: Result<AgentOutput, String>,
 }
 
+/// Persisted orchestration state for resumable runs. Serialized into the
+/// coordinator's checkpoint (`AgentCheckpoint.behavior_state`) so that, after a
+/// crash/restart, the next run for the same goal skips work already done.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrchestrationState {
+    goal: String,
+    items: Vec<OrchestrationItem>,
+    /// Set once synthesis has succeeded — a completed run is never resumed.
+    completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OrchestrationItem {
+    name: String,
+    description: String,
+    required_tools: Vec<String>,
+    /// `None` until this subtask's worker has finished.
+    outcome: Option<OrchestrationOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum OrchestrationOutcome {
+    Succeeded { content: String },
+    Failed { error: String },
+}
+
 /// Coordinator behavior — manages a pool of worker agents.
 ///
 /// The coordinator:
@@ -109,6 +136,11 @@ pub struct CoordinatorBehavior {
     /// each worker gets a Tier-4 semantic store under it; when unset, workers
     /// run without semantic memory (and create no on-disk store).
     data_dir: Option<String>,
+    /// Version counter for the coordinator's own orchestration checkpoints.
+    checkpoint_version: u64,
+    /// Orchestration state restored from a checkpoint in `on_start`; consumed by
+    /// the next run if its goal matches (resume), else discarded (fresh run).
+    resumed_state: Option<OrchestrationState>,
 }
 
 impl CoordinatorBehavior {
@@ -130,6 +162,8 @@ impl CoordinatorBehavior {
             long_term_memory: None,
             hook_registry: None,
             data_dir: None,
+            checkpoint_version: 0,
+            resumed_state: None,
         }
     }
 
@@ -258,6 +292,38 @@ impl CoordinatorBehavior {
         }
     }
 
+    /// Persist the current orchestration state to the coordinator's checkpoint
+    /// so a crash/restart can resume the run. No-op when no checkpoint store is
+    /// configured (lightweight/embedded use).
+    async fn checkpoint_orchestration(&mut self, state: &OrchestrationState) {
+        let Some(store) = self.checkpoint_store.clone() else {
+            return;
+        };
+        self.checkpoint_version += 1;
+        let checkpoint_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let behavior_state = match serde_json::to_string(state) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::warn!(coordinator = %self.agent_id, error = %e, "failed to serialize orchestration state");
+                return;
+            }
+        };
+        let ckpt = AgentCheckpoint {
+            version: self.checkpoint_version,
+            agent_id: self.agent_id.clone(),
+            checkpoint_time,
+            session_messages: Vec::new(),
+            cumulative_token_usage: TokenUsageStats::default(),
+            behavior_state,
+        };
+        if let Err(e) = store.save(&ckpt).await {
+            tracing::warn!(coordinator = %self.agent_id, error = %e, "failed to checkpoint orchestration");
+        }
+    }
+
     /// Decompose a goal into subtasks. Prefers the symbolic HTN planner: it
     /// plans, resolves any LLM frontiers (decomposing only those tasks with the
     /// model, not the whole goal), and errors if the plan can't be made fully
@@ -369,6 +435,34 @@ impl AgentBehavior for CoordinatorBehavior {
         self.system_prompt = config.system_prompt.clone();
         self.agent_id = config.id.to_string();
 
+        // Restore an incomplete orchestration so the next run can resume it
+        // (same model as a normal agent restoring its session on restart).
+        if let Some(store) = &self.checkpoint_store {
+            if let Ok(Some(ckpt)) = store.load_latest(&config.id).await {
+                self.checkpoint_version = ckpt.version;
+                if let Some(json) = ckpt.behavior_state {
+                    match serde_json::from_str::<OrchestrationState>(&json) {
+                        Ok(state) if !state.completed => {
+                            let done = state.items.iter().filter(|i| i.outcome.is_some()).count();
+                            tracing::info!(
+                                coordinator = %self.agent_id,
+                                done,
+                                total = state.items.len(),
+                                "Restored incomplete orchestration; will resume on next run"
+                            );
+                            self.resumed_state = Some(state);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            coordinator = %self.agent_id,
+                            error = %e,
+                            "ignoring unparseable orchestration checkpoint"
+                        ),
+                    }
+                }
+            }
+        }
+
         if let Some(budget) = &config.token_budget {
             self.tracker = Some(TokenTracker::new(budget.clone(), self.counter.clone()));
         }
@@ -412,37 +506,68 @@ impl CoordinatorBehavior {
         // actual request, not just a pile of worker outputs.
         let goal = input.content;
 
-        // 1. Decompose the task
-        let subtasks = self.decompose_task(&goal).await?;
+        // 1. Build the work list: resume an incomplete checkpointed run for the
+        //    same goal (skipping work already done), else decompose fresh.
+        let mut items: Vec<OrchestrationItem> = match self.resumed_state.take() {
+            Some(state) if !state.completed && state.goal == goal => {
+                let done = state.items.iter().filter(|i| i.outcome.is_some()).count();
+                tracing::info!(
+                    coordinator = %self.agent_id,
+                    done,
+                    total = state.items.len(),
+                    "Resuming orchestration from checkpoint"
+                );
+                state.items
+            }
+            _ => {
+                let subtasks = self.decompose_task(&goal).await?;
+                tracing::info!(
+                    coordinator = %self.agent_id,
+                    subtasks = subtasks.len(),
+                    "Decomposed task"
+                );
+                subtasks
+                    .into_iter()
+                    .map(|s| OrchestrationItem {
+                        name: s.name,
+                        description: s.description,
+                        required_tools: s.required_tools,
+                        outcome: None,
+                    })
+                    .collect()
+            }
+        };
 
-        tracing::info!(
-            coordinator = %self.agent_id,
-            subtasks = subtasks.len(),
-            "Decomposed task"
-        );
+        // Persist the plan so a crash after decomposition doesn't re-decompose.
+        let mut state = OrchestrationState {
+            goal: goal.clone(),
+            items: items.clone(),
+            completed: false,
+        };
+        self.checkpoint_orchestration(&state).await;
 
-        // 2. Assign each subtask to a worker by auction (best fit by tool match
-        //    and budget), removing the winner from the pool so each subtask gets
-        //    a distinct worker. When the pool is empty/exhausted, fall back to an
-        //    ad-hoc worker so behavior never regresses.
-        let mut assignments: Vec<(AgentId, String, String)> = Vec::new();
+        // 2. Assign each PENDING subtask to a worker by auction (best fit by tool
+        //    match and budget); already-completed items are skipped entirely.
+        let pending: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.outcome.is_none())
+            .map(|(i, _)| i)
+            .collect();
         let mut available = self.worker_configs.clone();
         let coord_id = self.agent_id.clone();
+        let mut assignments: Vec<(usize, AgentId)> = Vec::new();
 
-        for (i, subtask) in subtasks.iter().enumerate() {
-            // The auction matches workers to the subtask's required tools; load
-            // is 0 here since each pool worker is assigned at most once.
-            let required_tools = &subtask.required_tools;
+        for &idx in &pending {
+            let item = &items[idx];
+            let required_tools = &item.required_tools;
             // An ad-hoc worker granted exactly the subtask's required tools —
             // used when the pool is empty or no pooled worker can cover the
             // tools, so a subtask is never forced onto an unfit worker.
             let make_adhoc = || WorkerConfig {
-                id: AgentId::new(format!("{coord_id}-worker-{i}")),
-                name: format!("Worker {i}"),
-                system_prompt: format!(
-                    "You are a worker agent. Your task: {}",
-                    subtask.description
-                ),
+                id: AgentId::new(format!("{coord_id}-worker-{idx}")),
+                name: format!("Worker {idx}"),
+                system_prompt: format!("You are a worker agent. Your task: {}", item.description),
                 tools: required_tools.clone(),
                 token_budget: DEFAULT_WORKER_BUDGET,
             };
@@ -461,10 +586,8 @@ impl CoordinatorBehavior {
                     })
                     .collect();
                 match run_auction(bids).and_then(|id| available.iter().position(|w| w.id == id)) {
-                    Some(idx) => available.remove(idx),
+                    Some(pos) => available.remove(pos),
                     None => {
-                        // No pooled worker has the required tools — spawn a
-                        // capable ad-hoc worker rather than an unfit one.
                         tracing::warn!(
                             coordinator = %coord_id,
                             tools = ?required_tools,
@@ -474,63 +597,88 @@ impl CoordinatorBehavior {
                     }
                 }
             };
-
             let worker_id = self.spawn_worker(&worker_config).await?;
-            assignments.push((worker_id, subtask.name.clone(), subtask.description.clone()));
+            assignments.push((idx, worker_id));
         }
 
-        // 3. Delegate tasks to workers IN PARALLEL
+        // 3. Delegate the pending subtasks to workers IN PARALLEL.
         let mut join_set = tokio::task::JoinSet::new();
-        for (worker_id, task_name, description) in assignments {
+        for (idx, worker_id) in assignments {
             let actor = self.active_workers.get(&worker_id).cloned();
-            let desc = description.clone();
+            let desc = items[idx].description.clone();
+            let name = items[idx].name.clone();
             let wid = worker_id.clone();
-            let tname = task_name.clone();
             join_set.spawn(async move {
                 let result = if let Some(actor_ref) = actor {
                     execute_agent(&actor_ref, AgentInput::text(desc))
                         .await
-                        .map_err(|e| AgentError::Internal(format!("Worker {} failed: {e}", wid)))
+                        .map_err(|e| format!("Worker {wid} failed: {e}"))
                 } else {
-                    Err(AgentError::Internal(format!("Worker {} not found", wid)))
+                    Err(format!("Worker {wid} not found"))
                 };
-                (wid, tname, result)
+                (idx, name, wid, result)
             });
         }
 
-        let mut succeeded: Vec<(String, String)> = Vec::new();
-        let mut failed: Vec<(String, String)> = Vec::new();
+        // Record each outcome as it completes and checkpoint after every one, so
+        // a crash never loses finished work.
         let mut total_usage = TokenUsageStats::default();
-
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((worker_id, task_name, Ok(output))) => {
+                Ok((idx, name, worker_id, Ok(output))) => {
                     total_usage.merge(&output.token_usage);
-                    succeeded.push((task_name.clone(), output.content.clone()));
+                    items[idx].outcome = Some(OrchestrationOutcome::Succeeded {
+                        content: output.content.clone(),
+                    });
                     self.worker_results.push(WorkerResult {
                         worker_id,
-                        task_name,
+                        task_name: name,
                         output: Ok(output),
                     });
                 }
-                Ok((worker_id, task_name, Err(e))) => {
-                    tracing::warn!(worker = %worker_id, task = %task_name, error = %e, "Worker task failed");
-                    failed.push((task_name.clone(), e.to_string()));
+                Ok((idx, name, worker_id, Err(e))) => {
+                    tracing::warn!(worker = %worker_id, task = %name, error = %e, "Worker task failed");
+                    items[idx].outcome = Some(OrchestrationOutcome::Failed { error: e.clone() });
                     self.worker_results.push(WorkerResult {
                         worker_id,
-                        task_name,
-                        output: Err(e.to_string()),
+                        task_name: name,
+                        output: Err(e),
                     });
                 }
                 Err(e) => {
+                    // A panicked task carries no item index; leave the item
+                    // pending so a resume re-runs it.
                     tracing::error!(error = %e, "Worker task panicked");
-                    failed.push(("<panicked task>".to_string(), e.to_string()));
+                    continue;
                 }
             }
+            state.items = items.clone();
+            self.checkpoint_orchestration(&state).await;
         }
 
-        // If every worker failed there is nothing to synthesize — surface the
-        // failure rather than asking the model to make something out of nothing.
+        // 4. Aggregate outcomes across ALL items (including any restored from a
+        //    previous run). An item still pending here means its worker panicked.
+        let succeeded: Vec<(String, String)> = items
+            .iter()
+            .filter_map(|it| match &it.outcome {
+                Some(OrchestrationOutcome::Succeeded { content }) => {
+                    Some((it.name.clone(), content.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        let failed: Vec<(String, String)> = items
+            .iter()
+            .filter_map(|it| match &it.outcome {
+                Some(OrchestrationOutcome::Failed { error }) => {
+                    Some((it.name.clone(), error.clone()))
+                }
+                None => Some((it.name.clone(), "worker did not complete".to_string())),
+                _ => None,
+            })
+            .collect();
+
+        // If nothing succeeded there is nothing to synthesize — surface failure.
         if succeeded.is_empty() {
             return Err(AgentError::Internal(format!(
                 "all {} worker task(s) failed; nothing to synthesize",
@@ -538,7 +686,7 @@ impl CoordinatorBehavior {
             )));
         }
 
-        // 4. Synthesize: give the model the original goal and a structured view
+        // 5. Synthesize: give the model the original goal and a structured view
         //    of what succeeded and what failed so it answers the goal and
         //    accounts for any gaps.
         let mut synthesis_prompt = format!("Original goal:\n{goal}\n\nWorker results:\n");
@@ -560,14 +708,18 @@ impl CoordinatorBehavior {
                 .unwrap_or("You are a helpful coordinator."),
             synthesis_prompt,
         );
-
         let response = self
             .provider
             .chat(request)
             .await
             .map_err(|e| AgentError::Provider(e.to_string()))?;
-
         total_usage.merge(&response.usage);
+
+        // Mark the run complete so a later request for the same goal starts
+        // fresh rather than resuming this finished run.
+        state.items = items;
+        state.completed = true;
+        self.checkpoint_orchestration(&state).await;
 
         Ok(AgentOutput {
             content: response.content,
@@ -953,5 +1105,70 @@ mod tests {
         coord.on_start(&coord_config()).await.unwrap();
         let result = coord.execute(AgentInput::text("build something")).await;
         assert!(result.is_err(), "expected an error when all workers fail");
+    }
+
+    #[tokio::test]
+    async fn coordinator_resumes_incomplete_orchestration() {
+        use axocoatl_memory::CheckpointPolicy;
+
+        let tmp = std::env::temp_dir().join(format!("axo-coord-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let store = Arc::new(CheckpointStore::new(&tmp, CheckpointPolicy::Manual));
+
+        // Pre-seed a checkpoint for "lead": one item already done, one pending.
+        let state = OrchestrationState {
+            goal: "resume goal".to_string(),
+            items: vec![
+                OrchestrationItem {
+                    name: "done_item".to_string(),
+                    description: "already done".to_string(),
+                    required_tools: vec![],
+                    outcome: Some(OrchestrationOutcome::Succeeded {
+                        content: "prior result".to_string(),
+                    }),
+                },
+                OrchestrationItem {
+                    name: "pending_item".to_string(),
+                    description: "still to do".to_string(),
+                    required_tools: vec![],
+                    outcome: None,
+                },
+            ],
+            completed: false,
+        };
+        let ckpt = AgentCheckpoint {
+            version: 1,
+            agent_id: "lead".to_string(),
+            checkpoint_time: 0,
+            session_messages: Vec::new(),
+            cumulative_token_usage: TokenUsageStats::default(),
+            behavior_state: Some(serde_json::to_string(&state).unwrap()),
+        };
+        store.save(&ckpt).await.unwrap();
+
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockLlm);
+        let counter: Arc<dyn TokenCounter> = Arc::new(SimpleCounter);
+        let mut coord = CoordinatorBehavior::new(provider, counter)
+            .with_checkpoint_store(store.clone())
+            .add_worker_config(WorkerConfig {
+                id: AgentId::new("rw1"),
+                name: "RW1".to_string(),
+                system_prompt: "worker".to_string(),
+                tools: vec![],
+                token_budget: DEFAULT_WORKER_BUDGET,
+            });
+
+        // on_start restores the incomplete run; execute resumes it.
+        coord.on_start(&coord_config()).await.unwrap();
+        coord
+            .execute(AgentInput::text("resume goal"))
+            .await
+            .unwrap();
+
+        // Only the pending item ran this turn — the already-done item was skipped.
+        assert_eq!(coord.worker_results.len(), 1);
+        assert_eq!(coord.worker_results[0].task_name, "pending_item");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
