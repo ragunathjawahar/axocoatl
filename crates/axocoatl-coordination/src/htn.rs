@@ -10,6 +10,24 @@ pub struct HtnTask {
     pub task_type: HtnTaskType,
 }
 
+impl HtnTask {
+    /// The tool names this task requires, read from `parameters["tools"]`
+    /// (a JSON array of strings). Empty when the key is absent or not an array
+    /// of strings — methods that don't constrain tools simply impose none.
+    pub fn required_tools(&self) -> Vec<String> {
+        self.parameters
+            .get("tools")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HtnTaskType {
     /// Directly executable (maps to a tool or agent action).
@@ -19,7 +37,7 @@ pub enum HtnTaskType {
 }
 
 /// A decomposition method: how to break a compound task into primitives.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecompositionMethod {
     pub task_pattern: String,
     pub preconditions: Vec<Condition>,
@@ -27,7 +45,7 @@ pub struct DecompositionMethod {
 }
 
 /// A simple precondition check.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Condition {
     pub key: String,
     pub expected: serde_json::Value,
@@ -63,6 +81,7 @@ impl Default for HtnPlan {
 }
 
 /// The symbolic planner — resolves tasks without LLM calls when methods are available.
+#[derive(Clone)]
 pub struct HtnPlanner {
     methods: Vec<DecompositionMethod>,
     state: HashMap<String, serde_json::Value>,
@@ -74,6 +93,18 @@ impl HtnPlanner {
             methods: Vec::new(),
             state: HashMap::new(),
         }
+    }
+
+    /// Build a planner from a YAML methods document — a list of
+    /// `{ task_pattern, preconditions, subtasks }`. Used to load a workflow's
+    /// `htn_methods_file`.
+    pub fn from_methods_yaml(yaml: &str) -> Result<Self, String> {
+        let methods: Vec<DecompositionMethod> =
+            serde_yaml::from_str(yaml).map_err(|e| format!("parsing HTN methods: {e}"))?;
+        Ok(Self {
+            methods,
+            state: HashMap::new(),
+        })
     }
 
     /// Register a decomposition method.
@@ -258,11 +289,49 @@ mod tests {
     }
 
     #[test]
+    fn required_tools_reads_parameters() {
+        let mut params = HashMap::new();
+        params.insert(
+            "tools".to_string(),
+            serde_json::json!(["web_search", "http_client"]),
+        );
+        let task = HtnTask {
+            name: "search".to_string(),
+            parameters: params,
+            task_type: HtnTaskType::Primitive,
+        };
+        assert_eq!(task.required_tools(), vec!["web_search", "http_client"]);
+        // Absent → no constraint.
+        assert!(primitive("x").required_tools().is_empty());
+    }
+
+    #[test]
     fn compound_without_method_goes_to_frontier() {
         let planner = HtnPlanner::new();
         let plan = planner.plan(compound("unknown_task"));
         assert!(plan.primitives.is_empty());
         assert_eq!(plan.llm_frontiers.len(), 1);
+    }
+
+    #[test]
+    fn from_methods_yaml_parses_and_decomposes() {
+        let yaml = r#"
+- task_pattern: "build_app"
+  preconditions: []
+  subtasks:
+    - name: "design"
+      parameters: {}
+      task_type: Primitive
+    - name: "implement"
+      parameters: {}
+      task_type: Primitive
+"#;
+        let planner = HtnPlanner::from_methods_yaml(yaml).unwrap();
+        let plan = planner.plan(compound("build_app"));
+        assert_eq!(plan.primitives.len(), 2);
+        assert!(plan.llm_frontiers.is_empty());
+        assert_eq!(plan.primitives[0].name, "design");
+        assert_eq!(plan.primitives[1].name, "implement");
     }
 
     #[test]

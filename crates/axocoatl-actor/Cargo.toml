@@ -19,6 +19,7 @@ axocoatl-llm = { version = "0.1.0", path = "../axocoatl-llm" }
 axocoatl-token = { version = "0.1.0", path = "../axocoatl-token" }
 axocoatl-memory = { version = "0.1.0", path = "../axocoatl-memory" }
 axocoatl-tools = { version = "0.1.0", path = "../axocoatl-tools" }
+axocoatl-coordination = { version = "0.1.0", path = "../axocoatl-coordination" }
 ractor = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

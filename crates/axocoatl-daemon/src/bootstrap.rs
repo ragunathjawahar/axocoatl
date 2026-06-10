@@ -8,10 +8,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 
-use axocoatl_actor::{AgentActor, AgentBehavior, AgentRegistry, DefaultAgentBehavior};
-use axocoatl_config::AxocoatlConfig;
+use axocoatl_actor::{
+    AgentActor, AgentBehavior, AgentRegistry, CoordinatorBehavior, DefaultAgentBehavior,
+    WorkerConfig, DEFAULT_WORKER_BUDGET,
+};
+use axocoatl_config::{AgentRoleYaml, AxocoatlConfig};
 use axocoatl_coordination::{EventId, EventLattice, EventType, LatticeEvent};
-use axocoatl_core::AgentId;
+use axocoatl_core::{AgentId, AgentRole};
 use axocoatl_isolation::session_sandbox::{ExecResult, SessionSandbox};
 use axocoatl_llm::ProviderRegistry;
 use axocoatl_mcp::approval::{McpApprovalGate, SharedApprovalGate};
@@ -114,6 +117,28 @@ impl std::fmt::Debug for AxocoatlDaemon {
             .field("agents", &self.config.agents.len())
             .finish_non_exhaustive()
     }
+}
+
+/// An agent's event-lattice activation params: `(threshold, decay_rate)`.
+///
+/// Uses the per-agent `activation_threshold` / `activation_decay` overrides when
+/// set; otherwise the default — entry agents (no `depends_on`) get `(1.0, 0.0)`
+/// so a single `UserInput` (signal 1.0) activates them, and downstream agents
+/// get `(0.5 × N, 0.01)` so they fire once their N dependencies' `TaskCompleted`
+/// signals (0.5 each) accumulate.
+fn lattice_params(agent_yaml: &axocoatl_config::AgentConfigYaml) -> (f32, f32) {
+    let (mut threshold, mut decay_rate) = if agent_yaml.depends_on.is_empty() {
+        (1.0_f32, 0.0_f32)
+    } else {
+        (agent_yaml.depends_on.len() as f32 * 0.5, 0.01)
+    };
+    if let Some(t) = agent_yaml.activation_threshold {
+        threshold = t;
+    }
+    if let Some(d) = agent_yaml.activation_decay {
+        decay_rate = d;
+    }
+    (threshold, decay_rate)
 }
 
 impl AxocoatlDaemon {
@@ -241,6 +266,11 @@ impl AxocoatlDaemon {
         // 7. Spawn agents (deferred from earlier so the hook registry exists)
         let mut agent_handles = Vec::new();
         for agent_yaml in &config.agents {
+            // Workers are spawned on demand by their coordinator, not as
+            // standalone top-level agents — skip them in the main spawn loop.
+            if matches!(agent_yaml.role, AgentRoleYaml::Worker) {
+                continue;
+            }
             let handle = Self::spawn_agent(
                 agent_yaml,
                 &config,
@@ -260,17 +290,15 @@ impl AxocoatlDaemon {
         let event_lattice = Arc::new(EventLattice::new(256));
 
         for agent_yaml in &config.agents {
+            // Workers aren't lattice-activated — their coordinator drives them.
+            if matches!(agent_yaml.role, AgentRoleYaml::Worker) {
+                continue;
+            }
             let agent_id = AgentId::new(&agent_yaml.id);
-            // Entry agents are activated directly by execute_workflow().
-            // Downstream agents activate on accumulated TaskCompleted signals (0.5 each).
-            // Threshold = N * 0.5 where N = number of dependencies; use 1.0 for
-            // unreachable-via-cascade agents (defensive default).
-            let (threshold, decay_rate) = if agent_yaml.depends_on.is_empty() {
-                (1.0_f32, 0.0_f32)
-            } else {
-                let n = agent_yaml.depends_on.len() as f32;
-                (n * 0.5, 0.01)
-            };
+            // Entry agents activate directly via execute_workflow(); downstream
+            // agents activate on accumulated TaskCompleted signals. Threshold and
+            // decay come from lattice_params (per-agent override, else the default).
+            let (threshold, decay_rate) = lattice_params(agent_yaml);
             event_lattice.register_agent(agent_id, threshold, decay_rate);
         }
 
@@ -531,29 +559,100 @@ impl AxocoatlDaemon {
                 })?
         };
 
-        let mut behavior = DefaultAgentBehavior::new(provider, counter.clone())
-            .with_checkpoint_store(checkpoint_store.clone())
-            .with_tool_executor(tool_executor.clone())
-            .with_long_term_memory(long_term_memory.clone())
-            .with_hook_registry(hook_registry.clone());
+        // Select the behavior by role. A Coordinator orchestrates a pool of
+        // workers (the config's role:Worker agents), spawning and assigning them
+        // on demand; every other role runs the standard solo agent behavior.
+        let behavior: Box<dyn AgentBehavior> =
+            if matches!(agent_config.role, AgentRole::Coordinator) {
+                let data_dir =
+                    std::env::var("AXOCOATL_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+                // The coordinator gets the full dependency stack so it can give
+                // its workers checkpointing + memory + hooks, and checkpoint its
+                // own orchestration for resumable runs.
+                let mut coord = CoordinatorBehavior::new(provider, counter.clone())
+                    .with_tool_executor(tool_executor.clone())
+                    .with_checkpoint_store(checkpoint_store.clone())
+                    .with_long_term_memory(long_term_memory.clone())
+                    .with_hook_registry(hook_registry.clone())
+                    .with_data_dir(data_dir);
 
-        // Tier 4 semantic memory — one store per agent, for cross-session
-        // recall. A failure here is non-fatal: the agent runs without it.
-        let data_dir = std::env::var("AXOCOATL_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-        match axocoatl_memory::SemanticMemory::new(
-            &agent_id.to_string(),
-            format!("{data_dir}/memory/semantic"),
-        ) {
-            Ok(sem) => behavior = behavior.with_semantic_memory(Arc::new(sem)),
-            Err(e) => {
-                tracing::warn!(agent = %agent_id, error = %e, "semantic memory unavailable")
-            }
-        }
+                // Workers are scoped to THIS coordinator's workflow(s): the
+                // workflows whose entry_point is this coordinator (union across
+                // several). Config validation guarantees every worker belongs to
+                // a coordinator-led workflow, so none are orphaned.
+                let worker_ids: std::collections::HashSet<&str> = config
+                    .workflows
+                    .iter()
+                    .filter(|wf| wf.entry_point.as_deref() == Some(agent_yaml.id.as_str()))
+                    .flat_map(|wf| wf.agents.iter().map(String::as_str))
+                    .collect();
+                for w in &config.agents {
+                    if matches!(w.role, AgentRoleYaml::Worker) && worker_ids.contains(w.id.as_str())
+                    {
+                        coord = coord.add_worker_config(WorkerConfig {
+                            id: AgentId::new(&w.id),
+                            name: w.name.clone(),
+                            system_prompt: w.system_prompt.clone().unwrap_or_default(),
+                            tools: w.tools.clone(),
+                            token_budget: w
+                                .token_budget
+                                .as_ref()
+                                .map(|b| b.per_execution)
+                                .unwrap_or(DEFAULT_WORKER_BUDGET),
+                        });
+                    }
+                }
+                // Load HTN decomposition methods from this coordinator's
+                // workflow, if it declares an htn_methods_file. Non-fatal: on any
+                // failure the coordinator falls back to LLM decomposition.
+                if let Some(path) = config
+                    .workflows
+                    .iter()
+                    .find(|wf| wf.entry_point.as_deref() == Some(agent_yaml.id.as_str()))
+                    .and_then(|wf| wf.htn_methods_file.as_deref())
+                {
+                    match std::fs::read_to_string(path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|s| axocoatl_coordination::HtnPlanner::from_methods_yaml(&s))
+                    {
+                        Ok(planner) => {
+                            tracing::info!(agent = %agent_id, file = %path, "Loaded HTN methods");
+                            coord = coord.with_htn_methods(planner);
+                        }
+                        Err(e) => tracing::warn!(
+                            agent = %agent_id, file = %path, error = %e,
+                            "HTN methods unavailable; coordinator uses LLM decomposition"
+                        ),
+                    }
+                }
+                Box::new(coord)
+            } else {
+                let mut behavior = DefaultAgentBehavior::new(provider, counter.clone())
+                    .with_checkpoint_store(checkpoint_store.clone())
+                    .with_tool_executor(tool_executor.clone())
+                    .with_long_term_memory(long_term_memory.clone())
+                    .with_hook_registry(hook_registry.clone());
+
+                // Tier 4 semantic memory — one store per agent, for cross-session
+                // recall. A failure here is non-fatal: the agent runs without it.
+                let data_dir =
+                    std::env::var("AXOCOATL_DATA_DIR").unwrap_or_else(|_| "./data".to_string());
+                match axocoatl_memory::SemanticMemory::new(
+                    &agent_id.to_string(),
+                    format!("{data_dir}/memory/semantic"),
+                ) {
+                    Ok(sem) => behavior = behavior.with_semantic_memory(Arc::new(sem)),
+                    Err(e) => {
+                        tracing::warn!(agent = %agent_id, error = %e, "semantic memory unavailable")
+                    }
+                }
+                Box::new(behavior)
+            };
 
         let (actor_ref, handle) = AgentActor::spawn(
             Some(agent_id.to_string()),
             AgentActor,
-            (agent_config, Box::new(behavior) as Box<dyn AgentBehavior>),
+            (agent_config, behavior),
         )
         .await
         .map_err(|e| DaemonError::AgentSpawn(format!("{}: {e}", agent_id)))?;
@@ -603,11 +702,7 @@ impl AxocoatlDaemon {
         self.agent_handles.lock().unwrap().push(handle);
 
         // Re-register in the event lattice with the same threshold rules.
-        let (threshold, decay_rate) = if agent_yaml.depends_on.is_empty() {
-            (1.0_f32, 0.0_f32)
-        } else {
-            (agent_yaml.depends_on.len() as f32 * 0.5, 0.01)
-        };
+        let (threshold, decay_rate) = lattice_params(agent_yaml);
         self.event_lattice.register_agent(id, threshold, decay_rate);
 
         tracing::info!(agent = %agent_id, "Agent restarted");
@@ -619,6 +714,13 @@ impl AxocoatlDaemon {
     pub async fn dead_agents(&self) -> Vec<String> {
         let mut dead = Vec::new();
         for agent in &self.config.agents {
+            // Workers are spawned on demand by their coordinator, never as
+            // standalone supervised agents — so they're never "dead". (Treating
+            // them as dead makes the supervisor restart them forever, colliding
+            // with the coordinator's transient worker actors.)
+            if matches!(agent.role, AgentRoleYaml::Worker) {
+                continue;
+            }
             if !self.agent_registry.is_alive(&AgentId::new(&agent.id)).await {
                 dead.push(agent.id.clone());
             }

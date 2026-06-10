@@ -19,16 +19,6 @@ pub enum AgentMessage {
     GetStatus(oneshot::Sender<AgentStatus>),
     /// Get cumulative token usage.
     GetTokenUsage(oneshot::Sender<TokenUsageStats>),
-    /// Spawn a worker agent (coordinator mode).
-    SpawnWorker {
-        config: AgentConfig,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
-    /// Receive a result from a worker agent.
-    WorkerResult {
-        worker_id: String,
-        output: Result<AgentOutput, String>,
-    },
 }
 
 // ractor requires Message: Send + 'static
@@ -40,10 +30,6 @@ impl std::fmt::Debug for AgentMessage {
             AgentMessage::Execute { .. } => write!(f, "AgentMessage::Execute"),
             AgentMessage::GetStatus(_) => write!(f, "AgentMessage::GetStatus"),
             AgentMessage::GetTokenUsage(_) => write!(f, "AgentMessage::GetTokenUsage"),
-            AgentMessage::SpawnWorker { .. } => write!(f, "AgentMessage::SpawnWorker"),
-            AgentMessage::WorkerResult { worker_id, .. } => {
-                write!(f, "AgentMessage::WorkerResult({worker_id})")
-            }
         }
     }
 }
@@ -129,24 +115,6 @@ impl Actor for AgentActor {
             AgentMessage::GetTokenUsage(reply) => {
                 let _ = reply.send(state.token_usage.clone());
             }
-            AgentMessage::SpawnWorker { config, reply } => {
-                tracing::info!(
-                    parent = %state.config.id,
-                    worker = %config.id,
-                    "SpawnWorker request received"
-                );
-                // Coordinator handles spawning internally via CoordinatorBehavior
-                let _ = reply.send(Ok(()));
-            }
-            AgentMessage::WorkerResult { worker_id, output } => match &output {
-                Ok(o) => {
-                    state.token_usage.merge(&o.token_usage);
-                    tracing::debug!(worker = %worker_id, "Worker result received");
-                }
-                Err(e) => {
-                    tracing::warn!(worker = %worker_id, error = %e, "Worker failed");
-                }
-            },
         }
         Ok(())
     }

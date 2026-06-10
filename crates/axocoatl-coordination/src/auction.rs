@@ -44,7 +44,12 @@ pub fn compute_bid(
     }
 }
 
-/// Run an auction: return the winning agent (highest score > 0).
+/// Run an auction: return the winning agent (highest score > 0), or `None` when
+/// no agent bid above zero (e.g. none has the required tools).
+///
+/// Tie-break is deterministic: when several agents share the maximum score,
+/// `Iterator::max_by` returns the **last** such agent in `bids` order. Callers
+/// that build `bids` in a stable order (e.g. config order) get a stable winner.
 pub fn run_auction(bids: Vec<AgentBid>) -> Option<AgentId> {
     bids.into_iter()
         .filter(|b| b.score > 0.0)
@@ -81,6 +86,32 @@ mod tests {
         let agent = agent_with_tools("a", vec!["read_file"]);
         let bid = compute_bid(&agent, &["web_search".to_string()], 0, 5000);
         assert_eq!(bid.score, 0.0);
+    }
+
+    #[test]
+    fn run_auction_tie_break_returns_last() {
+        // Identical scores: the auction deterministically returns the last
+        // agent in bid order.
+        let bids = vec![
+            AgentBid {
+                agent_id: AgentId::new("first"),
+                score: 0.8,
+            },
+            AgentBid {
+                agent_id: AgentId::new("last"),
+                score: 0.8,
+            },
+        ];
+        assert_eq!(run_auction(bids), Some(AgentId::new("last")));
+    }
+
+    #[test]
+    fn run_auction_no_positive_bids_returns_none() {
+        let bids = vec![AgentBid {
+            agent_id: AgentId::new("a"),
+            score: 0.0,
+        }];
+        assert_eq!(run_auction(bids), None);
     }
 
     #[test]
