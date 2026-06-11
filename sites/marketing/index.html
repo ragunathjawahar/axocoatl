@@ -84,7 +84,7 @@
         "name": "Axocoatl",
         "url": "https://axocoatl.ai/",
         "downloadUrl": "https://axocoatl.ai/install",
-        "softwareVersion": "0.1.0",
+        "softwareVersion": "0.1.2",
         "applicationCategory": "DeveloperApplication",
         "applicationSubCategory": "AI agent runtime",
         "operatingSystem": "Linux, macOS",
@@ -119,7 +119,7 @@
     <section class="container hero">
       <span class="hero-tagline">
         <span class="hero-tagline-dot"></span>
-        v0.1.0 · Rust · Apache-2.0
+        v0.1.2 · Rust · Apache-2.0
       </span>
       <h1>Real workflows.<br>No theater.</h1>
       <p class="lede">
@@ -230,6 +230,46 @@
   - <span class="code-key">id:</span> <span class="code-string">research-and-summarize</span>
     <span class="code-key">agents:</span> [<span class="code-string">researcher</span>, <span class="code-string">summarizer</span>]
     <span class="code-key">entry_point:</span> <span class="code-string">researcher</span></code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─────────────── Memory · agents that remember ─────────────── -->
+    <section class="container section">
+      <div class="split">
+        <div>
+          <span class="eyebrow">Concept · 30 seconds</span>
+          <h2>Agents that actually remember.</h2>
+          <p>
+            Most agents are stateless. Axocoatl gives each one real memory:
+            a live session, a daily log it can read back by date, and a
+            neural recall tier with on-device embeddings, so nothing it
+            learns ever calls out to an API.
+          </p>
+          <p>
+            The part that matters most is core memory: small, agent-editable
+            blocks the agent curates as it works, rendered into its context
+            every turn (the MemGPT model). While it sits idle, a background
+            pass promotes durable facts up into those blocks. Understanding
+            compounds instead of resetting every run.
+          </p>
+          <a class="btn btn-ghost" href="/concepts" style="margin-top: var(--s-4);">
+            How it works →
+          </a>
+        </div>
+        <div class="code-pane">
+          <div class="code-pane-head">
+            <span class="finder-lights">
+              <span class="finder-light red"></span>
+              <span class="finder-light amber"></span>
+              <span class="finder-light green"></span>
+            </span>
+            <span>core-memory · agent-curated</span>
+          </div>
+<pre><code><span class="code-comment"># in the prompt every turn, edited by the agent</span>
+<span class="code-key">[persona]</span>  How I work, the standards I hold to.
+<span class="code-key">[human]</span>    What I know about who I'm working with.
+<span class="code-key">[project]</span>  Durable decisions, conventions, context.</code></pre>
         </div>
       </div>
     </section>
