@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-06-11
+
 ### Added
 - **Agent-managed core memory (MemGPT/Letta-style blocks).** Tier 3 is now a set
   of named, character-limited, agent-editable blocks (default: `persona`,
@@ -41,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   single answer. Decomposition is HTN-symbolic when methods are configured (an
   `HtnPlanner` expands compound tasks; an `LlmFrontierResolver` fills only the
   frontiers the methods don't cover) and LLM-driven otherwise. Workers are
-  first-class agents — their own tools, checkpoints, long-term + semantic memory,
+  first-class agents — their own tools, checkpoints, core + semantic memory,
   and hooks — with run-scoped actor names, and they are torn down after every
   pass (on success and on every error path) so nothing leaks. The pass is
   **resumable**: the plan and each finished subtask are checkpointed, so a crash
@@ -57,6 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of forgetting it. The 5-stage `CompressionPipeline`'s LLM stages
   (microcompact, autocompact) are now wired to a concrete `LlmSummarizer`, whose
   own summarization tokens count against the agent's budget.
+- **OpenAI-compatible servers + per-agent model.** The `openai` provider now
+  honors a configurable `base_url`, so it targets any OpenAI-compatible endpoint
+  (LM Studio, MLX/oMLX, vLLM, and others), not just `api.openai.com`. Each agent's
+  configured `model` is sent as a per-request override, so a shared provider uses
+  the agent's model, including in the summarizer and the consolidation pass. Stdio
+  MCP servers now receive their configured env vars (e.g. an API key), and four
+  catalog entries were repointed from nonexistent npm packages to their `uvx` /
+  PyPI equivalents. (Initial PR by first-time contributor Andris Gauračs.)
 
 ### Changed
 - **Tier 3 is no longer a shared key-value fact store.** The old daemon-global
