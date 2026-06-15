@@ -10,7 +10,6 @@ pub mod neural;
 pub mod perms;
 pub mod semantic;
 pub mod session;
-pub mod transcript;
 
 pub use chat::*;
 pub use checkpoint::*;
@@ -20,4 +19,3 @@ pub use error::*;
 pub use files::*;
 pub use semantic::*;
 pub use session::*;
-pub use transcript::*;

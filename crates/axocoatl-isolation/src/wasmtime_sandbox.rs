@@ -108,10 +108,9 @@ impl WasmtimeSandbox {
             }
         })?;
 
-        // Read stdout — but we can't easily get it back from WasiP1Ctx
-        // In a real implementation we'd use a shared output buffer
-        // For now, return a success marker
-        // TODO: implement proper stdout capture with wasmtime 43 WASIp1
+        // The module ran to completion under the fuel limit. Capturing guest
+        // stdout from WasiP1Ctx is an experimental gap in this opt-in tier, so
+        // we return a completion marker rather than the captured output.
         Ok(serde_json::json!({"status": "ok"}))
     }
 }

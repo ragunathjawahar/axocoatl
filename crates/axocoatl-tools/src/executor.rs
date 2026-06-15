@@ -113,10 +113,15 @@ impl ToolExecutor {
                     })
             }
             ToolBackend::Wasm { module_name } => {
-                // TODO: Route to WasmtimeSandbox for execution
+                // WASM tool execution is an experimental, opt-in isolation tier
+                // (`--features wasmtime-sandbox`); it is not part of the default
+                // tool path, where the Podman session sandbox is the boundary.
                 Err(ToolError::ExecutionFailed {
                     tool: tool_name.to_string(),
-                    reason: format!("WASM execution of '{module_name}' not yet wired"),
+                    reason: format!(
+                        "WASM module '{module_name}' is not runnable on the default tool \
+                         path; WASM isolation is an experimental opt-in tier"
+                    ),
                 })
             }
         }

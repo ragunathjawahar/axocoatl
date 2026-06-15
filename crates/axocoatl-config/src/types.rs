@@ -17,6 +17,10 @@ pub struct AxocoatlConfig {
     pub server: ServerConfigYaml,
     #[serde(default)]
     pub sandbox: SandboxConfigYaml,
+    /// **Experimental — not yet active.** User-defined hooks are parsed but not
+    /// executed at runtime; only the built-in MCP tool-approval hook runs. A
+    /// non-empty `hooks:` section logs a warning at daemon startup. See
+    /// `HookConfigYaml`.
     #[serde(default)]
     pub hooks: Vec<HookConfigYaml>,
     #[serde(default)]
@@ -107,8 +111,9 @@ pub enum ProactiveTrigger {
     OnEvent { event: String },
 }
 
-/// A scheduled workflow run. `every` accepts simple intervals:
-///   "30s", "5m", "2h", "1d", or "cron: 0 9 * * *" (cron daily 09:00).
+/// A scheduled workflow run. `every` accepts fixed intervals only:
+///   "30s", "5m", "2h", "1d" (seconds / minutes / hours / days). Cron
+///   expressions are not supported.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleConfigYaml {
     pub id: String,
@@ -216,12 +221,8 @@ pub enum OverflowPolicyYaml {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryConfigYaml {
-    #[serde(default)]
-    pub backend: MemoryBackendYaml,
     #[serde(default = "default_max_session")]
     pub max_session_messages: usize,
-    /// Path for LanceDB storage (used when backend is lancedb).
-    pub path: Option<String>,
     /// Recall tuning (passive injection + agent-driven recall tools).
     #[serde(default)]
     pub recall: RecallConfigYaml,
@@ -287,15 +288,6 @@ fn default_recall_top_k() -> usize {
 }
 fn default_recall_min_score() -> f32 {
     0.15
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryBackendYaml {
-    #[default]
-    InMemory,
-    Lancedb,
-    Qdrant,
 }
 
 /// Workflow configuration.
@@ -506,6 +498,11 @@ fn default_sandbox_network() -> String {
 }
 
 /// Hook configuration in YAML.
+///
+/// **Experimental — not yet active.** These entries are parsed and validated but
+/// are not invoked by the runtime; the only hook that executes is the built-in
+/// MCP tool-approval gate. Configuring `hooks:` is currently a no-op (the daemon
+/// emits a startup warning to make this explicit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookConfigYaml {
     pub name: String,

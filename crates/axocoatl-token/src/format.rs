@@ -1,3 +1,11 @@
+//! Experimental token-efficient serialization formats (TOON / CSV).
+//!
+//! These compact representations exist to measure token savings versus JSON and
+//! are exercised by `benches/token_efficiency.rs`. They are **not on the agent
+//! execution path** — no daemon, actor, or tool code serializes through this
+//! module today. Kept to back the benchmark and for future adoption; treat the
+//! API as experimental.
+
 /// Supported serialization formats for agent-to-agent communication.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenFormat {
