@@ -294,6 +294,16 @@ impl AxocoatlDaemon {
         )));
         let hook_registry = Arc::new(hook_registry);
 
+        // User-defined `hooks:` are parsed but not yet executed by the runtime —
+        // only the built-in MCP approval hook above runs. Warn once at startup so
+        // a configured-but-inert `hooks:` section is never a silent no-op.
+        if !config.hooks.is_empty() {
+            tracing::warn!(
+                count = config.hooks.len(),
+                "config `hooks:` is experimental and not yet active; only the built-in MCP approval hook runs"
+            );
+        }
+
         // 7. Spawn agents (deferred from earlier so the hook registry exists)
         let mut agent_handles = Vec::new();
         for agent_yaml in &config.agents {

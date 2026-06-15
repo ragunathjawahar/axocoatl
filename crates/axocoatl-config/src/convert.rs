@@ -1,8 +1,8 @@
 //! Conversion from YAML config types to axocoatl-core types.
 
 use axocoatl_core::{
-    AgentConfig, AgentId, AgentRole, CoreBlockConfig, CoreMemoryConfig, MemoryBackend,
-    MemoryConfig, OverflowPolicy, RecallConfig, TokenBudget,
+    AgentConfig, AgentId, AgentRole, CoreBlockConfig, CoreMemoryConfig, MemoryConfig,
+    OverflowPolicy, RecallConfig, TokenBudget,
 };
 
 use crate::types::*;
@@ -59,21 +59,6 @@ impl AgentRoleYaml {
 impl MemoryConfigYaml {
     pub fn to_core(&self) -> MemoryConfig {
         MemoryConfig {
-            backend: match &self.backend {
-                MemoryBackendYaml::InMemory => MemoryBackend::InMemory,
-                MemoryBackendYaml::Lancedb => MemoryBackend::LanceDb {
-                    path: self
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| "./data/memory".to_string()),
-                },
-                MemoryBackendYaml::Qdrant => MemoryBackend::Qdrant {
-                    url: self
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| "http://localhost:6334".to_string()),
-                },
-            },
             max_session_messages: self.max_session_messages,
             recall: self.recall.to_core(),
             core: self.core.to_core(),
@@ -177,29 +162,27 @@ mod tests {
     }
 
     #[test]
-    fn memory_config_lancedb() {
+    fn memory_config_maps_session_limit() {
         let yaml = MemoryConfigYaml {
-            backend: MemoryBackendYaml::Lancedb,
             max_session_messages: 50,
-            path: Some("./custom/path".to_string()),
             recall: RecallConfigYaml::default(),
             core: CoreMemoryConfigYaml::default(),
         };
         let core = yaml.to_core();
-        assert!(matches!(core.backend, MemoryBackend::LanceDb { path } if path == "./custom/path"));
+        assert_eq!(core.max_session_messages, 50);
     }
 
     #[test]
     fn core_memory_config_defaults_and_override() {
         // Omitted `core` → default block set (persona + human + project).
-        let yaml: MemoryConfigYaml = serde_yaml::from_str("backend: in_memory").unwrap();
+        let yaml: MemoryConfigYaml = serde_yaml::from_str("max_session_messages: 100").unwrap();
         let core = yaml.to_core();
         let labels: Vec<&str> = core.core.blocks.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(labels, ["persona", "human", "project"]);
 
         // Explicit blocks replace the defaults.
         let yaml: MemoryConfigYaml = serde_yaml::from_str(
-            "backend: in_memory\ncore:\n  blocks:\n    - label: notes\n      limit: 500\n      shared: true",
+            "core:\n  blocks:\n    - label: notes\n      limit: 500\n      shared: true",
         )
         .unwrap();
         let core = yaml.to_core();
@@ -212,7 +195,7 @@ mod tests {
     #[test]
     fn recall_config_defaults_when_absent() {
         // Existing YAML with no `recall:` block keeps working — defaults applied.
-        let yaml: MemoryConfigYaml = serde_yaml::from_str("backend: in_memory").unwrap();
+        let yaml: MemoryConfigYaml = serde_yaml::from_str("max_session_messages: 100").unwrap();
         let core = yaml.to_core();
         assert!(core.recall.passive_inject);
         assert_eq!(core.recall.top_k, 5);
@@ -221,10 +204,9 @@ mod tests {
 
     #[test]
     fn recall_config_parsed_and_mapped() {
-        let yaml: MemoryConfigYaml = serde_yaml::from_str(
-            "backend: in_memory\nrecall:\n  passive_inject: false\n  top_k: 12\n  min_score: 0.3",
-        )
-        .unwrap();
+        let yaml: MemoryConfigYaml =
+            serde_yaml::from_str("recall:\n  passive_inject: false\n  top_k: 12\n  min_score: 0.3")
+                .unwrap();
         let core = yaml.to_core();
         assert!(!core.recall.passive_inject);
         assert_eq!(core.recall.top_k, 12);

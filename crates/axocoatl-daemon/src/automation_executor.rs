@@ -412,17 +412,33 @@ pub fn execute_automation_inner_with_inputs<'a>(
                         park_interrupt(daemon, &automation.id, run_id, node_id, &resolved_input)
                             .await;
                     pi.notify.notified().await;
+                    // A cancelled interrupt carries no operator input — the
+                    // node's output is empty and the run proceeds, but we surface
+                    // it as a distinct "Cancelled" event, not a normal resume.
+                    let cancelled = pi.cancelled.load(std::sync::atomic::Ordering::SeqCst);
                     let resume_value = pi.resume_value.lock().await.clone().unwrap_or_default();
-                    let final_out = match resume_strategy {
-                        ResumeStrategy::Replace => resume_value,
-                        ResumeStrategy::Append => format!("{resolved_input}\n\n{resume_value}"),
+                    let final_out = if cancelled {
+                        String::new()
+                    } else {
+                        match resume_strategy {
+                            ResumeStrategy::Replace => resume_value,
+                            ResumeStrategy::Append => format!("{resolved_input}\n\n{resume_value}"),
+                        }
                     };
                     daemon.pending_interrupts.write().await.remove(&pi.key());
                     outputs.insert(node_id.clone(), final_out);
                     completed.push(format!("interrupt:{node_id}"));
                     activate_all_outgoing(automation, node_id, &mut active);
                     let _ = daemon.run_store.mark_running(&automation.id, run_id).await;
-                    emit_event(daemon, &automation.id, None, node_id, "Resumed", None, None);
+                    emit_event(
+                        daemon,
+                        &automation.id,
+                        None,
+                        node_id,
+                        if cancelled { "Cancelled" } else { "Resumed" },
+                        None,
+                        None,
+                    );
                     write_checkpoint(
                         daemon,
                         &automation.id,

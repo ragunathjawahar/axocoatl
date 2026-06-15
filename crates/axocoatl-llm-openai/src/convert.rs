@@ -149,7 +149,8 @@ pub fn extract_tool_calls(choice: &async_openai::types::chat::ChatChoice) -> Vec
                         arguments: serde_json::from_str(&func_call.function.arguments)
                             .unwrap_or(serde_json::Value::Null),
                     }),
-                    _ => None, // Skip custom tool calls for now
+                    // Only function tool-calls are produced for our request shape.
+                    _ => None,
                 })
                 .collect()
         })

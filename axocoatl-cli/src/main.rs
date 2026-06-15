@@ -1044,7 +1044,7 @@ async fn cmd_dev(config_path: &std::path::Path) {
     let state: std::sync::Arc<tokio::sync::RwLock<axocoatl_daemon::AxocoatlDaemon>> =
         std::sync::Arc::new(tokio::sync::RwLock::new(daemon));
 
-    // Start the schedule runner (cron tasks).
+    // Start the schedule runner (scheduled tasks).
     let (schedule_table, schedules) = {
         let d = state.read().await;
         (d.schedule_table.clone(), d.config.schedules.clone())

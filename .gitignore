@@ -10,6 +10,7 @@
 
 # Runtime data & secrets
 /data
+data.bak-*/
 **/data/checkpoints
 **/data/memory
 **/data/models

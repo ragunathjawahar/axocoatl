@@ -1267,26 +1267,28 @@ impl AgentBehavior for DefaultAgentBehavior {
             }
         }
 
-        // Checkpoint after execution
+        // Checkpoint after execution, when the store's policy says to.
         if let Some(store) = &self.checkpoint_store {
-            self.checkpoint_version += 1;
-            let ckpt = AgentCheckpoint {
-                version: self.checkpoint_version,
-                agent_id: self.agent_id.clone(),
-                checkpoint_time: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                session_messages: self.session.messages().to_vec(),
-                cumulative_token_usage: self
-                    .tracker
-                    .as_ref()
-                    .map(|t| TokenUsageStats::new(t.input_used(), t.output_used()))
-                    .unwrap_or_default(),
-                behavior_state: None,
-            };
-            if let Err(e) = store.save(&ckpt).await {
-                tracing::warn!(agent = %self.agent_id, error = %e, "Checkpoint save failed");
+            if store.should_checkpoint(self.session.messages().len()) {
+                self.checkpoint_version += 1;
+                let ckpt = AgentCheckpoint {
+                    version: self.checkpoint_version,
+                    agent_id: self.agent_id.clone(),
+                    checkpoint_time: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    session_messages: self.session.messages().to_vec(),
+                    cumulative_token_usage: self
+                        .tracker
+                        .as_ref()
+                        .map(|t| TokenUsageStats::new(t.input_used(), t.output_used()))
+                        .unwrap_or_default(),
+                    behavior_state: None,
+                };
+                if let Err(e) = store.save(&ckpt).await {
+                    tracing::warn!(agent = %self.agent_id, error = %e, "Checkpoint save failed");
+                }
             }
         }
 

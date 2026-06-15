@@ -180,10 +180,10 @@ pub fn default_core_blocks() -> Vec<CoreBlockConfig> {
     ]
 }
 
-/// Memory backend configuration.
+/// Memory configuration. Semantic (Tier-4) memory is always the on-disk store
+/// built by `SemanticMemory::new`; there is no runtime backend selector.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    pub backend: MemoryBackend,
     pub max_session_messages: usize,
     /// Recall tuning (passive injection + agent-driven recall tools).
     #[serde(default)]
@@ -196,24 +196,11 @@ pub struct MemoryConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
-            backend: MemoryBackend::default(),
             max_session_messages: 100,
             recall: RecallConfig::default(),
             core: CoreMemoryConfig::default(),
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub enum MemoryBackend {
-    #[default]
-    InMemory,
-    LanceDb {
-        path: String,
-    },
-    Qdrant {
-        url: String,
-    },
 }
 
 #[cfg(test)]
@@ -266,9 +253,6 @@ mod tests {
             }),
             tools: vec!["web_search".to_string(), "read_file".to_string()],
             memory: MemoryConfig {
-                backend: MemoryBackend::LanceDb {
-                    path: "./data/memory".to_string(),
-                },
                 max_session_messages: 50,
                 recall: RecallConfig::default(),
                 core: CoreMemoryConfig::default(),
@@ -309,11 +293,5 @@ mod tests {
     fn overflow_policy_default_is_abort() {
         let policy = OverflowPolicy::default();
         assert!(matches!(policy, OverflowPolicy::Abort));
-    }
-
-    #[test]
-    fn memory_backend_default_is_in_memory() {
-        let backend = MemoryBackend::default();
-        assert!(matches!(backend, MemoryBackend::InMemory));
     }
 }

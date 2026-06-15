@@ -18,7 +18,13 @@ pub type AppState = Arc<RwLock<AxocoatlDaemon>>;
 ///
 /// `auth` gates every route except the health probes (see [`auth::enforce`]).
 /// `cors_origins` is the cross-origin allow-list; empty means same-origin only.
-pub fn build_router(state: AppState, auth: auth::AuthConfig, cors_origins: Vec<String>) -> Router {
+/// `rate_limiter` throttles per client IP (a no-op when disabled, the default).
+pub fn build_router(
+    state: AppState,
+    auth: auth::AuthConfig,
+    cors_origins: Vec<String>,
+    rate_limiter: Arc<middleware::RateLimiter>,
+) -> Router {
     let auth_for_mw = auth.clone();
     Router::new()
         .route("/", get(routes::dashboard))
@@ -207,12 +213,20 @@ pub fn build_router(state: AppState, auth: auth::AuthConfig, cors_origins: Vec<S
         // A2A protocol — discovery card + task intake (behind auth).
         .route("/.well-known/agent.json", get(routes::a2a_agent_card))
         .route("/a2a/tasks", post(routes::a2a_receive_task))
-        // Layers run outermost-first on the request. CORS handles preflight,
-        // then logging (so 401s are recorded), then auth right before handlers.
+        // Layers run outermost-first on the request: CORS handles preflight,
+        // then logging (so 401s/429s are recorded), then the rate limiter
+        // (throttles before auth so unauthenticated floods are capped), then
+        // auth right before handlers.
         .layer(axum::middleware::from_fn(
             move |req: axum::extract::Request, next: axum::middleware::Next| {
                 let cfg = auth_for_mw.clone();
                 async move { auth::enforce(&cfg, req, next).await }
+            },
+        ))
+        .layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let rl = rate_limiter.clone();
+                async move { middleware::rate_limit(rl, req, next).await }
             },
         ))
         .layer(axum::middleware::from_fn(middleware::request_logging))
@@ -242,13 +256,14 @@ pub async fn serve(daemon: AxocoatlDaemon, host: &str, port: u16) -> std::io::Re
 /// Start the HTTP server with a shared daemon state (for use alongside IPC).
 pub async fn serve_shared(state: AppState, host: &str, port: u16) -> std::io::Result<()> {
     // Pull auth + CORS from the live config.
-    let (auth, cors_origins, allow_unauthenticated) = {
+    let (auth, cors_origins, allow_unauthenticated, rate_cfg) = {
         let d = state.read().await;
         let s = &d.config.server;
         (
             auth::AuthConfig::new(s.auth.api_keys.clone(), s.auth.bearer_tokens.clone()),
             s.cors_origins.clone(),
             s.auth.allow_unauthenticated,
+            s.rate_limit.clone(),
         )
     };
 
@@ -277,13 +292,32 @@ pub async fn serve_shared(state: AppState, host: &str, port: u16) -> std::io::Re
         );
     }
 
-    let app = build_router(state, auth, cors_origins);
+    let rate_limiter = Arc::new(middleware::RateLimiter::new(middleware::RateLimitConfig {
+        max_requests: rate_cfg.max_requests,
+        window_secs: rate_cfg.window_secs,
+        enabled: rate_cfg.enabled,
+    }));
+    if rate_cfg.enabled {
+        tracing::info!(
+            max_requests = rate_cfg.max_requests,
+            window_secs = rate_cfg.window_secs,
+            "HTTP rate limiting enabled"
+        );
+    }
+
+    let app = build_router(state, auth, cors_origins, rate_limiter);
 
     let addr = format!("{host}:{port}");
     tracing::info!(addr = %addr, "Starting Axocoatl API server");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    // `into_make_service_with_connect_info` exposes the peer `SocketAddr` to the
+    // rate-limit middleware so it can key per client IP.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

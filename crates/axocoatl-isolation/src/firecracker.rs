@@ -129,9 +129,12 @@ impl VmHandle {
         // Protocol: JSON request/response over vsock
         tracing::debug!(vm_id = %self.vm_id, tool = %tool_name, "Executing tool in VM");
 
-        // TODO: Implement vsock client communication
+        // In-VM tool execution over vsock belongs to this experimental, opt-in
+        // Firecracker tier and is not built — the shipped isolation boundary is
+        // the rootless Podman session sandbox.
         Err(IsolationError::ExecutionFailed(format!(
-            "vsock tool execution not yet implemented for tool '{tool_name}'"
+            "Firecracker in-VM execution is an experimental tier; tool '{tool_name}' \
+             cannot run on it"
         )))
     }
 

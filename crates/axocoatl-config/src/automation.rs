@@ -285,7 +285,8 @@ pub struct AutomationEdge {
 pub enum AutomationTrigger {
     /// User clicks Run. Input comes from the UI prompt.
     Manual,
-    /// Fires on a cron-like cadence. Stored `input` is reused every fire.
+    /// Fires on a fixed interval cadence (`every`: s/m/h/d). Stored `input` is
+    /// reused every fire.
     Schedule {
         every: String,
         #[serde(default)]

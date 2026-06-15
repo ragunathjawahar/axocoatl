@@ -372,7 +372,6 @@ dependencies = [
  "axocoatl-config",
  "axocoatl-coordination",
  "axocoatl-core",
- "axocoatl-graph",
  "axocoatl-isolation",
  "axocoatl-llm",
  "axocoatl-llm-anthropic",

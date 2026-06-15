@@ -17,6 +17,10 @@ pub struct AxocoatlConfig {
     pub server: ServerConfigYaml,
     #[serde(default)]
     pub sandbox: SandboxConfigYaml,
+    /// **Experimental — not yet active.** User-defined hooks are parsed but not
+    /// executed at runtime; only the built-in MCP tool-approval hook runs. A
+    /// non-empty `hooks:` section logs a warning at daemon startup. See
+    /// `HookConfigYaml`.
     #[serde(default)]
     pub hooks: Vec<HookConfigYaml>,
     #[serde(default)]
@@ -107,8 +111,9 @@ pub enum ProactiveTrigger {
     OnEvent { event: String },
 }
 
-/// A scheduled workflow run. `every` accepts simple intervals:
-///   "30s", "5m", "2h", "1d", or "cron: 0 9 * * *" (cron daily 09:00).
+/// A scheduled workflow run. `every` accepts fixed intervals only:
+///   "30s", "5m", "2h", "1d" (seconds / minutes / hours / days). Cron
+///   expressions are not supported.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleConfigYaml {
     pub id: String,
@@ -216,12 +221,8 @@ pub enum OverflowPolicyYaml {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryConfigYaml {
-    #[serde(default)]
-    pub backend: MemoryBackendYaml,
     #[serde(default = "default_max_session")]
     pub max_session_messages: usize,
-    /// Path for LanceDB storage (used when backend is lancedb).
-    pub path: Option<String>,
     /// Recall tuning (passive injection + agent-driven recall tools).
     #[serde(default)]
     pub recall: RecallConfigYaml,
@@ -287,15 +288,6 @@ fn default_recall_top_k() -> usize {
 }
 fn default_recall_min_score() -> f32 {
     0.15
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryBackendYaml {
-    #[default]
-    InMemory,
-    Lancedb,
-    Qdrant,
 }
 
 /// Workflow configuration.
@@ -382,6 +374,10 @@ pub struct ServerConfigYaml {
     /// API from a user's browser). Add explicit origins to opt in.
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// Per-IP HTTP rate limiting. Disabled by default — intended for a
+    /// publicly-reachable deployment; a loopback dashboard needs no limit.
+    #[serde(default)]
+    pub rate_limit: RateLimitYaml,
 }
 
 impl Default for ServerConfigYaml {
@@ -391,20 +387,53 @@ impl Default for ServerConfigYaml {
             host: default_host(),
             auth: ServerAuthYaml::default(),
             cors_origins: Vec::new(),
+            rate_limit: RateLimitYaml::default(),
         }
     }
+}
+
+/// Per-IP HTTP rate-limit configuration. Off by default; when `enabled`, a
+/// client exceeding `max_requests` within `window_secs` gets `429`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitYaml {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_rate_max")]
+    pub max_requests: u32,
+    #[serde(default = "default_rate_window")]
+    pub window_secs: u64,
+}
+
+impl Default for RateLimitYaml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_requests: default_rate_max(),
+            window_secs: default_rate_window(),
+        }
+    }
+}
+
+fn default_rate_max() -> u32 {
+    100
+}
+
+fn default_rate_window() -> u64 {
+    60
 }
 
 /// API authentication for the HTTP/WS server. Tokens support `${ENV_VAR}`
 /// interpolation so they need not be committed in plaintext.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerAuthYaml {
-    /// Accepted `x-api-key` values.
+    /// Accepted `x-api-key` values. Held as `SecretString` so a stray `{:?}`
+    /// can never leak a credential into logs; `${ENV}` interpolation still
+    /// applies (it runs on the raw YAML before parsing).
     #[serde(default)]
-    pub api_keys: Vec<String>,
-    /// Accepted `Authorization: Bearer <token>` values.
+    pub api_keys: Vec<SecretString>,
+    /// Accepted `Authorization: Bearer <token>` values. Redacted like `api_keys`.
     #[serde(default)]
-    pub bearer_tokens: Vec<String>,
+    pub bearer_tokens: Vec<SecretString>,
     /// Escape hatch: bind a non-loopback address **without** auth (e.g. when an
     /// upstream proxy enforces it). The operator takes responsibility — the
     /// fail-closed guard is skipped only when this is explicitly `true`.
@@ -469,6 +498,11 @@ fn default_sandbox_network() -> String {
 }
 
 /// Hook configuration in YAML.
+///
+/// **Experimental — not yet active.** These entries are parsed and validated but
+/// are not invoked by the runtime; the only hook that executes is the built-in
+/// MCP tool-approval gate. Configuring `hooks:` is currently a no-op (the daemon
+/// emits a startup warning to make this explicit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookConfigYaml {
     pub name: String,
