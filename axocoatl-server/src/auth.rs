@@ -5,6 +5,7 @@
 //! probes. The set of accepted credentials comes from the server config
 //! (`server.auth`); see [`AuthConfig`].
 
+use axocoatl_config::SecretString;
 use axum::{
     extract::Request,
     http::{HeaderMap, StatusCode},
@@ -12,13 +13,14 @@ use axum::{
     response::Response,
 };
 
-/// Configuration for server authentication.
+/// Configuration for server authentication. Credentials are held as
+/// `SecretString` so they are redacted in `Debug` / logs.
 #[derive(Debug, Clone, Default)]
 pub struct AuthConfig {
     /// API keys accepted via the `x-api-key` header.
-    pub api_keys: Vec<String>,
+    pub api_keys: Vec<SecretString>,
     /// Bearer tokens accepted via the `Authorization` header.
-    pub bearer_tokens: Vec<String>,
+    pub bearer_tokens: Vec<SecretString>,
     /// When false, all requests pass through (loopback/local use).
     pub enabled: bool,
 }
@@ -26,7 +28,7 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Build from the parsed `server.auth` config. Enabled automatically when
     /// any credential is present.
-    pub fn new(api_keys: Vec<String>, bearer_tokens: Vec<String>) -> Self {
+    pub fn new(api_keys: Vec<SecretString>, bearer_tokens: Vec<SecretString>) -> Self {
         let enabled = !api_keys.is_empty() || !bearer_tokens.is_empty();
         Self {
             api_keys,
@@ -62,12 +64,16 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
 /// Whether the request carries a credential that this config accepts.
 fn is_authorized(config: &AuthConfig, headers: &HeaderMap) -> bool {
     if let Some(key) = extract_api_key(headers) {
-        if config.api_keys.contains(&key) {
+        if config.api_keys.iter().any(|k| k.expose_secret() == key) {
             return true;
         }
     }
     if let Some(token) = extract_bearer_token(headers) {
-        if config.bearer_tokens.contains(&token) {
+        if config
+            .bearer_tokens
+            .iter()
+            .any(|t| t.expose_secret() == token)
+        {
             return true;
         }
     }

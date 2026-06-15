@@ -37,14 +37,27 @@ pub enum CheckpointPolicy {
 
 pub struct CheckpointStore {
     base_dir: PathBuf,
-    _policy: CheckpointPolicy,
+    policy: CheckpointPolicy,
 }
 
 impl CheckpointStore {
     pub fn new(base_dir: impl Into<PathBuf>, policy: CheckpointPolicy) -> Self {
         Self {
             base_dir: base_dir.into(),
-            _policy: policy,
+            policy,
+        }
+    }
+
+    /// Whether an automatic checkpoint should be written now, given the
+    /// session's current message count. Honors the configured
+    /// [`CheckpointPolicy`]: `EveryLlmCall` always checkpoints,
+    /// `EveryNMessages(n)` every `n` messages, and `Manual`/`None` never
+    /// auto-checkpoint (an explicit [`CheckpointStore::save`] still works).
+    pub fn should_checkpoint(&self, message_count: usize) -> bool {
+        match &self.policy {
+            CheckpointPolicy::EveryLlmCall => true,
+            CheckpointPolicy::EveryNMessages(n) => *n > 0 && message_count % *n == 0,
+            CheckpointPolicy::Manual | CheckpointPolicy::None => false,
         }
     }
 
@@ -261,5 +274,23 @@ mod tests {
             bincode::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
         assert_eq!(decoded.version, 42);
         assert_eq!(decoded.agent_id, "test");
+    }
+
+    #[test]
+    fn should_checkpoint_honors_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let every = CheckpointStore::new(tmp.path(), CheckpointPolicy::EveryLlmCall);
+        assert!(every.should_checkpoint(1));
+        assert!(every.should_checkpoint(7));
+
+        let every_3 = CheckpointStore::new(tmp.path(), CheckpointPolicy::EveryNMessages(3));
+        assert!(!every_3.should_checkpoint(1));
+        assert!(every_3.should_checkpoint(3));
+        assert!(every_3.should_checkpoint(6));
+
+        let manual = CheckpointStore::new(tmp.path(), CheckpointPolicy::Manual);
+        assert!(!manual.should_checkpoint(3));
+        let none = CheckpointStore::new(tmp.path(), CheckpointPolicy::None);
+        assert!(!none.should_checkpoint(3));
     }
 }

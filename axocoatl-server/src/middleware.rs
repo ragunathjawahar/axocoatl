@@ -1,11 +1,13 @@
 //! HTTP middleware for the Axocoatl API server.
 //! Rate limiting, request logging, and CORS.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::Request,
-    http::{header, Method},
+    extract::{ConnectInfo, Request},
+    http::{header, Method, StatusCode},
     middleware::Next,
     response::Response,
 };
@@ -70,6 +72,28 @@ impl RateLimiter {
         } else {
             false
         }
+    }
+}
+
+/// Per-IP rate-limit middleware. The peer address comes from `ConnectInfo`
+/// (the server is served with `into_make_service_with_connect_info`). Returns
+/// `429 Too Many Requests` when a client exceeds its window. A pass-through
+/// no-op when the limiter is disabled (the default), so a loopback dashboard is
+/// never throttled unless an operator opts in.
+pub async fn rate_limit(
+    limiter: Arc<RateLimiter>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let ip = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    if limiter.check(&ip) {
+        Ok(next.run(request).await)
+    } else {
+        Err(StatusCode::TOO_MANY_REQUESTS)
     }
 }
 

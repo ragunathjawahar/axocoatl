@@ -45,8 +45,19 @@ impl TokenTracker {
         Ok(())
     }
 
-    /// Check if a proposed call would exceed budget BEFORE making it.
+    /// Check if a proposed call would exceed budget BEFORE making it. Enforces
+    /// both caps: the single-call cap (`per_call`) and the cumulative
+    /// per-execution cap. The caller applies the overflow policy (abort/warn).
     pub fn check_headroom(&self, estimated_input: usize) -> Result<(), BudgetError> {
+        // Per-call cap: a single call's estimated input must fit `per_call`.
+        if estimated_input > self.budget.per_call {
+            return Err(BudgetError::WouldExceedBudget {
+                current: 0,
+                requested: estimated_input,
+                budget: self.budget.per_call,
+            });
+        }
+        // Per-execution cap: cumulative usage plus this call must fit.
         let current =
             self.used_input.load(Ordering::Relaxed) + self.used_output.load(Ordering::Relaxed);
         if current + estimated_input > self.budget.per_execution {
@@ -142,6 +153,20 @@ mod tests {
         tracker.record_usage(80, 0).unwrap();
         assert!(tracker.check_headroom(30).is_err());
         assert!(tracker.check_headroom(10).is_ok());
+    }
+
+    #[test]
+    fn check_headroom_enforces_per_call() {
+        // A single call larger than per_call is refused even with ample
+        // per-execution headroom.
+        let budget = TokenBudget {
+            per_call: 50,
+            per_execution: 10_000,
+            overflow_policy: OverflowPolicy::Abort,
+        };
+        let tracker = TokenTracker::new(budget, Arc::new(SimpleCounter));
+        assert!(tracker.check_headroom(60).is_err());
+        assert!(tracker.check_headroom(40).is_ok());
     }
 
     #[test]

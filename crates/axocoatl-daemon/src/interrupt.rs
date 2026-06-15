@@ -42,8 +42,9 @@ pub struct PendingInterrupt {
     /// Set by `resume()` before notifying; the executor reads this when
     /// it wakes.
     pub resume_value: Arc<tokio::sync::Mutex<Option<String>>>,
-    /// Set to true by `cancel()` instead of `resume()` — executor
-    /// treats this node's output as empty and proceeds.
+    /// Set to true by `cancel()` instead of `resume()`. The executor reads it
+    /// when it wakes, emits a distinct "Cancelled" event, and proceeds with
+    /// this node's output set to empty.
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 

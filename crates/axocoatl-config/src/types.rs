@@ -382,6 +382,10 @@ pub struct ServerConfigYaml {
     /// API from a user's browser). Add explicit origins to opt in.
     #[serde(default)]
     pub cors_origins: Vec<String>,
+    /// Per-IP HTTP rate limiting. Disabled by default — intended for a
+    /// publicly-reachable deployment; a loopback dashboard needs no limit.
+    #[serde(default)]
+    pub rate_limit: RateLimitYaml,
 }
 
 impl Default for ServerConfigYaml {
@@ -391,20 +395,53 @@ impl Default for ServerConfigYaml {
             host: default_host(),
             auth: ServerAuthYaml::default(),
             cors_origins: Vec::new(),
+            rate_limit: RateLimitYaml::default(),
         }
     }
+}
+
+/// Per-IP HTTP rate-limit configuration. Off by default; when `enabled`, a
+/// client exceeding `max_requests` within `window_secs` gets `429`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitYaml {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_rate_max")]
+    pub max_requests: u32,
+    #[serde(default = "default_rate_window")]
+    pub window_secs: u64,
+}
+
+impl Default for RateLimitYaml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_requests: default_rate_max(),
+            window_secs: default_rate_window(),
+        }
+    }
+}
+
+fn default_rate_max() -> u32 {
+    100
+}
+
+fn default_rate_window() -> u64 {
+    60
 }
 
 /// API authentication for the HTTP/WS server. Tokens support `${ENV_VAR}`
 /// interpolation so they need not be committed in plaintext.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerAuthYaml {
-    /// Accepted `x-api-key` values.
+    /// Accepted `x-api-key` values. Held as `SecretString` so a stray `{:?}`
+    /// can never leak a credential into logs; `${ENV}` interpolation still
+    /// applies (it runs on the raw YAML before parsing).
     #[serde(default)]
-    pub api_keys: Vec<String>,
-    /// Accepted `Authorization: Bearer <token>` values.
+    pub api_keys: Vec<SecretString>,
+    /// Accepted `Authorization: Bearer <token>` values. Redacted like `api_keys`.
     #[serde(default)]
-    pub bearer_tokens: Vec<String>,
+    pub bearer_tokens: Vec<SecretString>,
     /// Escape hatch: bind a non-loopback address **without** auth (e.g. when an
     /// upstream proxy enforces it). The operator takes responsibility — the
     /// fail-closed guard is skipped only when this is explicitly `true`.
