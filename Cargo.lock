@@ -386,12 +386,14 @@ dependencies = [
  "axocoatl-tools",
  "dashmap",
  "ractor",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

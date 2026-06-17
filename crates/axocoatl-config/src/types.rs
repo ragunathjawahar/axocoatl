@@ -33,6 +33,8 @@ pub struct AxocoatlConfig {
     pub web_search: Option<WebSearchConfigYaml>,
     #[serde(default)]
     pub consolidation: ConsolidationConfigYaml,
+    #[serde(default)]
+    pub webhooks: Vec<WebhookConfigYaml>,
 }
 
 /// Background "sleep-time" memory consolidation: idle agents promote durable
@@ -128,6 +130,18 @@ pub struct ScheduleConfigYaml {
 
 fn default_enabled() -> bool {
     true
+}
+
+/// Webhook configuration for the event lattice egress sink.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookConfigYaml {
+    pub name: String,
+    pub url: String,
+    /// List of event types to dispatch. If empty, all events are dispatched.
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
 }
 
 /// A Skill — Axocoatl's lattice-aware unit of capability.

@@ -15,6 +15,7 @@ pub mod skill_tool;
 pub mod stream;
 pub mod supervision;
 pub mod workflow;
+pub mod webhook;
 
 pub use bootstrap::*;
 pub use error::*;
