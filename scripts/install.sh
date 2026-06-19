@@ -16,6 +16,15 @@ arch="$(uname -m)"
 case "$os" in
   Linux)  os_part="unknown-linux-gnu" ;;
   Darwin) os_part="apple-darwin" ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    err "Axocoatl runs on Windows through WSL2, not natively (its session sandbox
+  is Podman and its service is systemd/launchd). Open a WSL2 distro (e.g. Ubuntu)
+  and run this same command there:
+
+      curl -fsSL https://axocoatl.ai/install.sh | sh
+
+  No WSL2 yet? In an admin PowerShell:  wsl --install  (then reboot).
+  Full guide: https://docs.axocoatl.ai/getting-started/#windows-wsl2" ;;
   *) err "unsupported OS '$os' — use 'cargo install axocoatl-cli' or build from source" ;;
 esac
 
@@ -74,6 +83,11 @@ case ":${PATH}:" in
   *":${dest}:"*) ;;
   *) info "add ${dest} to your PATH:  export PATH=\"${dest}:\$PATH\"" ;;
 esac
+
+# In WSL2 a fresh distro has no Podman, which sandboxed directory sessions need.
+if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && ! command -v podman >/dev/null 2>&1; then
+  info "WSL detected — install Podman for sandboxed sessions:  sudo apt-get install -y podman"
+fi
 
 echo
 echo "Next:  ${BIN} onboard      # interactive setup"
