@@ -74,9 +74,9 @@
       <span class="eyebrow">Install</span>
       <h1>One binary.<br>Sixty seconds.</h1>
       <p class="lede">
-        Prebuilt binaries for Linux and macOS, x86_64 and aarch64. The
-        install script verifies a SHA-256 checksum before installing
-        anywhere on your PATH.
+        Prebuilt binaries for Linux and macOS, x86_64 and aarch64 — and on
+        Windows, inside WSL2. The install script verifies a SHA-256 checksum
+        before installing anywhere on your PATH.
       </p>
     </section>
 
@@ -94,6 +94,20 @@
         <h2 style="margin-top: var(--s-8);">From source</h2>
         <p class="muted">The release binary lands at <code>target/release/axocoatl</code>.</p>
         <ax-cli-snippet>git clone https://github.com/axocoatl/axocoatl && cd axocoatl && cargo build --release</ax-cli-snippet>
+
+        <h2 style="margin-top: var(--s-8);">Windows (WSL2)</h2>
+        <p class="muted">
+          Axocoatl is Unix-first — the session sandbox is Podman, the service is
+          systemd/launchd — so on Windows it runs inside WSL2, not natively. Set up
+          WSL2 (<code>wsl --install</code> in an admin PowerShell), then inside your
+          distro install Podman and run the same one-liner:
+        </p>
+        <ax-cli-snippet>sudo apt-get install -y podman &amp;&amp; curl -fsSL https://axocoatl.ai/install.sh | sh</ax-cli-snippet>
+        <p class="muted" style="margin-top: var(--s-3);">
+          Run <code>axocoatl dev</code> in WSL, then open <code>http://localhost:8080</code> in
+          your Windows browser. Full steps in the
+          <a href="https://docs.axocoatl.ai/getting-started/#windows-wsl2" target="_blank" rel="noopener">Windows guide</a>.
+        </p>
 
       </div>
     </section>

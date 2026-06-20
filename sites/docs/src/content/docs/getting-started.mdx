@@ -10,7 +10,8 @@ my box." If anything breaks, see [Troubleshooting](/guides/troubleshooting/).
 
 ## Prerequisites
 
-- macOS or Linux (x86_64 or aarch64).
+- macOS or Linux (x86_64 or aarch64). On Windows, run Axocoatl inside WSL2 —
+  see [Windows (WSL2)](#windows-wsl2) below.
 - [Ollama](https://ollama.com) for local LLM use (recommended for first
   contact). Five other providers work too — OpenAI, Anthropic, Mistral,
   Gemini, and OpenRouter; set the right key in `.env`. (The `openai` provider
@@ -73,6 +74,44 @@ my box." If anything breaks, see [Troubleshooting](/guides/troubleshooting/).
    canvas.
 
 </Steps>
+
+## Windows (WSL2)
+
+Axocoatl is a Unix-first runtime — the session sandbox is rootless Podman and
+the always-on service is systemd/launchd — so on Windows it runs **inside
+WSL2**, not natively. There is no native Windows binary; the install script
+above will point you here if you run it from PowerShell or Git Bash.
+
+<Steps>
+
+1. **Install WSL2.** In an administrator PowerShell, then reboot when prompted
+   (this installs Ubuntu by default):
+
+   ```powershell
+   wsl --install
+   ```
+
+2. **Open your WSL distro and install Podman** (needed for sandboxed directory
+   sessions):
+
+   ```sh
+   sudo apt-get update && sudo apt-get install -y podman
+   ```
+
+3. **Install Axocoatl inside WSL** — the same one-liner, now detected as Linux:
+
+   ```sh
+   curl -fsSL https://axocoatl.ai/install.sh | sh
+   ```
+
+4. **Run it.** `axocoatl dev` inside WSL, then open `http://localhost:8080` in
+   your Windows browser — WSL2 forwards `localhost` to the host automatically.
+
+</Steps>
+
+For the always-on service (`axocoatl service install`), enable systemd in WSL2:
+add a `[boot]` section with `systemd=true` to `/etc/wsl.conf`, then run
+`wsl --shutdown` once from PowerShell. Plain `axocoatl dev` does not need it.
 
 ## What just happened?
 
