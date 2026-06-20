@@ -14,6 +14,7 @@ prerequisites, run command, and expected output.
 | [incident-response.yaml](incident-response.yaml) | 3 | Skills (`emits` / `reacts_to`) + an ops agent |
 | [local-only.yaml](local-only.yaml) | 2 | Ollama, no API keys — data never leaves the box |
 | [mcp-tools.yaml](mcp-tools.yaml) | 1 | a single MCP server (stdio transport) |
+| [event-webhooks.yaml](event-webhooks.yaml) | 2 | outbound event egress — signed webhooks on `TaskCompleted` / `AgentFailed` |
 
 ## Running an example
 
@@ -27,4 +28,5 @@ axocoatl dev -c examples/configs/research-pipeline.yaml
 
 Most examples need a local Ollama (`ollama serve && ollama pull llama3.2`) — no
 cloud API key required. The `mcp-tools` example additionally needs `npx` on your
-PATH for the filesystem MCP server.
+PATH for the filesystem MCP server. The `event-webhooks` example reads
+`WEBHOOK_SECRET` from the environment to sign its deliveries.

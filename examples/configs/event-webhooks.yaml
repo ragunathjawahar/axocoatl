@@ -1,0 +1,45 @@
+# event-webhooks — outbound lattice event egress (signed webhooks)
+#
+# Prerequisites: ollama serve && ollama pull llama3.2
+#                export WEBHOOK_SECRET=any-value   # enables HMAC-SHA256 signing
+# Run:           axocoatl validate examples/configs/event-webhooks.yaml
+#                axocoatl dev -c examples/configs/event-webhooks.yaml
+# Expected:      validates; `axocoatl doctor` lists the webhook host so you can
+#                see exactly what leaves the box. When the workflow runs (fire it
+#                from the dashboard), each TaskCompleted / AgentFailed sends a
+#                signed JSON POST to the URL. Remove the `webhooks:` section and
+#                the daemon makes zero outbound requests.
+
+agents:
+  - id: researcher
+    name: "Researcher"
+    provider: ollama
+    model: llama3.2
+    system_prompt: "Research the question and summarize the key findings."
+    depends_on: []
+
+  - id: summarizer
+    name: "Summarizer"
+    provider: ollama
+    model: llama3.2
+    system_prompt: "Condense the research into a short brief."
+    depends_on: [researcher]
+
+# Lattice event egress: the outbound counterpart to inbound A2A. Opt-in — with no
+# `webhooks:` section the daemon never makes an outbound request.
+webhooks:
+  - name: deploy-alerts
+    url: https://hooks.example.com/axocoatl
+    # Event names to send. Empty ([]) means all coordination events; pure
+    # telemetry like AgentActivated is excluded unless you name it explicitly.
+    events: [TaskCompleted, AgentFailed]
+    # With a secret, each body is HMAC-SHA256 signed and the hex digest is sent
+    # in `X-Axocoatl-Signature: sha256=…` so the receiver can verify it.
+    secret: ${WEBHOOK_SECRET}
+    # Optional static headers (e.g. an auth bearer for an internal endpoint).
+    headers:
+      X-Source: axocoatl
+
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
