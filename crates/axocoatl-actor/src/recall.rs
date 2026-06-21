@@ -292,14 +292,23 @@ mod tests {
         );
     }
 
+    /// The fixed day these daily-log tests write to and read from — pinned so a
+    /// real midnight crossing can't split a batch across two date files (a flake
+    /// that fails CI on unrelated merges).
+    const TEST_DAY: &str = "2020-01-15";
+
     async fn daily_log_with_entries(dir: &std::path::Path, n: usize) -> Arc<DailyLogMemory> {
         let log = Arc::new(DailyLogMemory::new("test-agent", dir));
+        let day = chrono::NaiveDate::parse_from_str(TEST_DAY, "%Y-%m-%d").unwrap();
         for i in 0..n {
-            log.append(LogEntry {
-                timestamp: i as u64,
-                entry_type: LogEntryType::Note,
-                content: json!(format!("entry number {i}")),
-            })
+            log.append_at(
+                day,
+                LogEntry {
+                    timestamp: i as u64,
+                    entry_type: LogEntryType::Note,
+                    content: json!(format!("entry number {i}")),
+                },
+            )
             .await
             .unwrap();
         }
@@ -307,12 +316,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_timeframe_reads_today() {
+    async fn recall_timeframe_reads_a_day() {
         let dir = tempfile::tempdir().unwrap();
         let log = daily_log_with_entries(dir.path(), 3).await;
-        let today = chrono::Local::now().date_naive().to_string();
         let tool = RecallTimeframeTool::new(log);
-        let out = tool.execute(json!({ "date": today })).await.unwrap();
+        let out = tool.execute(json!({ "date": TEST_DAY })).await.unwrap();
         assert_eq!(out["count"].as_u64().unwrap(), 3);
         assert_eq!(out["truncated"], json!(false));
         assert_eq!(out["entries"].as_array().unwrap().len(), 3);
@@ -322,9 +330,8 @@ mod tests {
     async fn recall_timeframe_truncates_large_days() {
         let dir = tempfile::tempdir().unwrap();
         let log = daily_log_with_entries(dir.path(), MAX_TIMEFRAME_ENTRIES + 5).await;
-        let today = chrono::Local::now().date_naive().to_string();
         let tool = RecallTimeframeTool::new(log);
-        let out = tool.execute(json!({ "date": today })).await.unwrap();
+        let out = tool.execute(json!({ "date": TEST_DAY })).await.unwrap();
         assert_eq!(
             out["count"].as_u64().unwrap(),
             (MAX_TIMEFRAME_ENTRIES + 5) as u64
