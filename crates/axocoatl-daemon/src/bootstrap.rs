@@ -410,6 +410,16 @@ impl AxocoatlDaemon {
             }
         });
 
+        // 12. Spawn the lattice event-egress (webhook) dispatcher — only when
+        //     webhooks are configured, so a default install makes zero outbound
+        //     requests and the air-gapped story holds.
+        if !config.webhooks.is_empty() {
+            tokio::spawn(crate::webhook::run_webhook_dispatcher(
+                event_lattice.subscribe(),
+                config.webhooks.clone(),
+            ));
+        }
+
         // Directory sessions — load any persisted sessions from disk.
         let session_store = {
             let mut store = SessionStore::new(format!("{data_dir}/sessions"))

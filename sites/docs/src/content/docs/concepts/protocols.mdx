@@ -1,13 +1,13 @@
 ---
-title: Protocols — MCP and A2A
-description: Axocoatl speaks MCP both ways — it calls external MCP tools and exposes its own agents as MCP tools — and accepts inbound A2A tasks.
+title: Protocols — MCP, A2A, and event egress
+description: Axocoatl speaks MCP both ways, accepts inbound A2A tasks, and emits signed outbound event webhooks.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Axocoatl agents don't live in a walled garden. The daemon speaks two
-interop protocols: **MCP** (Model Context Protocol) in both directions, and
-**A2A** (Agent-to-Agent) inbound.
+Axocoatl agents don't live in a walled garden. The daemon speaks **MCP**
+(Model Context Protocol) in both directions, accepts inbound **A2A**
+(Agent-to-Agent) tasks, and emits signed outbound **event webhooks**.
 
 ## MCP client — calling external tools
 
@@ -64,6 +64,63 @@ A2A is **inbound only**. Other agent systems can discover and dispatch tasks
 daemon, so an agent can't delegate *out* to a remote A2A agent.
 </Aside>
 
+## Event egress — outbound webhooks
+
+A2A and the MCP server are inbound — the outside reaches *in*. **Webhooks are
+the outbound counterpart:** when the lattice publishes an event, Axocoatl POSTs
+a signed JSON payload to systems *you* own (Slack, PagerDuty, a CI pipeline).
+It's the lattice's outbound notification — opt-in and verifiable.
+
+```yaml
+webhooks:
+  - name: deploy-alerts
+    url: https://hooks.example.com/axocoatl
+    events: [TaskCompleted, AgentFailed]   # empty = all coordination events
+    secret: ${WEBHOOK_SECRET}              # enables HMAC-SHA256 signing
+    headers:
+      Authorization: ${INTERNAL_TOKEN}     # optional static headers
+```
+
+**Opt-in.** With no `webhooks:` configured the dispatcher never runs, so a
+default install makes zero outbound requests. `axocoatl doctor` and the startup
+log name exactly which hosts receive egress, so you always see what leaves the
+box.
+
+**Payload** — a stable JSON schema:
+
+```json
+{
+  "delivery_id": "…",             // unique per delivery; use it for idempotency
+  "event_id": "…",
+  "event_type": "TaskCompleted",  // the canonical event name
+  "produced_by": "researcher",
+  "timestamp": 1700000000,
+  "payload": { }                  // the event's own payload
+}
+```
+
+**Filtering.** `events` lists the names to send (`TaskCompleted`, `AgentFailed`,
+or a Skill's own custom event name). Empty means *all coordination events* —
+pure telemetry like `AgentActivated` is excluded unless you name it.
+
+**Signing.** With a `secret`, every body is HMAC-SHA256 signed and the hex
+digest is sent in `X-Axocoatl-Signature: sha256=…` (alongside `X-Axocoatl-Event`,
+`-Delivery`, and `-Timestamp`). Recompute the HMAC on your side to verify the
+request is genuinely from your Axocoatl and untampered. Secrets and header
+values are held as secrets and never logged.
+
+**Delivery.** At-least-once *best-effort*, in-process: transient failures
+(timeout, 5xx, 429) are retried with exponential backoff + jitter, honoring
+`Retry-After`; a 4xx is not retried. Deliveries are concurrency-bounded (dropped
+under a flood, never unbounded-spawned) and are **not durable across a daemon
+restart** — pair with a message broker if you need stronger guarantees.
+
+<Aside type="note">
+Webhooks carry event data — including agent-output previews — to the endpoint
+you configure. That is consistent with the local-first promise: nothing leaves
+your box unless *you* wire it. The default is no egress.
+</Aside>
+
 ## A2A vs. MCP vs. the HTTP execute endpoint
 
 Three different doors lead to "run this agent." Which one you use depends on
@@ -86,3 +143,5 @@ integrations.
   — connecting to an external MCP server and calling its tools.
 - [`examples/a2a-server`](https://github.com/axocoatl/axocoatl/tree/main/examples/a2a-server)
   — the inbound A2A surface end to end.
+- [`examples/configs/event-webhooks.yaml`](https://github.com/axocoatl/axocoatl/tree/main/examples/configs/event-webhooks.yaml)
+  — outbound event egress: event filter + HMAC signing.
