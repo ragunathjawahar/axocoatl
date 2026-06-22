@@ -36,8 +36,20 @@ impl DailyLogMemory {
 
     /// Append an entry to today's log.
     pub async fn append(&self, entry: LogEntry) -> Result<(), MemoryError> {
+        self.append_at(chrono::Local::now().date_naive(), entry)
+            .await
+    }
+
+    /// Append an entry to a specific date's log. `append` targets today; this
+    /// lets callers pin an exact date, so behavior (and tests) never depend on a
+    /// wall-clock midnight crossing splitting a batch across two date files.
+    pub async fn append_at(
+        &self,
+        date: chrono::NaiveDate,
+        entry: LogEntry,
+    ) -> Result<(), MemoryError> {
         tokio::fs::create_dir_all(&self.base_dir).await?;
-        let path = self.log_path_today();
+        let path = self.log_path(date);
 
         let line = serde_json::to_string(&entry)? + "\n";
         tokio::fs::OpenOptions::new()
@@ -85,11 +97,6 @@ impl DailyLogMemory {
         &self.agent_id
     }
 
-    fn log_path_today(&self) -> PathBuf {
-        let today = chrono::Local::now().date_naive();
-        self.log_path(today)
-    }
-
     fn log_path(&self, date: chrono::NaiveDate) -> PathBuf {
         self.base_dir
             .join(format!("{}.jsonl", date.format("%Y-%m-%d")))
@@ -112,15 +119,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_and_read_today() {
+    async fn append_and_read_a_day() {
         let tmp = tempfile::tempdir().unwrap();
         let log = DailyLogMemory::new("test-agent", tmp.path());
 
-        log.append(test_entry("first")).await.unwrap();
-        log.append(test_entry("second")).await.unwrap();
+        // Pin an explicit date so a real midnight crossing during the test can't
+        // split the batch across two date files.
+        let day = chrono::NaiveDate::from_ymd_opt(2020, 1, 15).unwrap();
+        log.append_at(day, test_entry("first")).await.unwrap();
+        log.append_at(day, test_entry("second")).await.unwrap();
 
-        let today = chrono::Local::now().date_naive();
-        let entries = log.read_range(today, today).await.unwrap();
+        let entries = log.read_range(day, day).await.unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].content["text"], "first");
         assert_eq!(entries[1].content["text"], "second");
