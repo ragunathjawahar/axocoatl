@@ -47,18 +47,22 @@ Prefer Cargo? `cargo install axocoatl-cli` (requires Rust 1.82+).
 
 ## Why Axocoatl
 
-| Capability | Axocoatl | AutoAgents | CrewAI |
-|---|:--:|:--:|:--:|
-| Language / runtime | Rust / actors | Rust / actors | Python |
-| **Stigmergic coordination** (no orchestrator) | ✅ | ❌ | ❌ |
-| HTN symbolic planning | ✅ | ❌ | ❌ |
-| Auction-based agent selection | ✅ | ❌ | ❌ |
-| Per-agent token budgets | ✅ | ❌ | partial |
-| 4-tier persistent memory + checkpointing | ✅ | partial | partial |
-| MCP client + server | ✅ | partial | ✅ |
-| A2A protocol | ✅ | ❌ | ❌ |
-| Provider-agnostic (Ollama/OpenAI/Anthropic/…) | ✅ | ✅ | ✅ |
-| Interactive onboarding + `doctor` | ✅ | ❌ | ❌ |
+Most agent tooling is a framework you wire together and a cloud you rent.
+Axocoatl is a runtime you own:
+
+- **Stigmergic coordination, no orchestrator** — agents activate when their
+  dependencies complete, driven by pheromone-style signals. No central scheduler.
+- **A coordinator when you need one** — an agent can decompose a goal, auction the
+  subtasks to workers it spawns, and run them in parallel (symbolic HTN planning
+  when you provide methods, otherwise the LLM).
+- **Four-tier memory + checkpointing** — agents remember across runs and resume from
+  their last checkpoint after a crash.
+- **Per-agent token budgets** — enforced pre-flight, per agent.
+- **MCP client + server** — discover and call external MCP tools, and expose your own
+  agents as MCP tools. Inbound A2A too.
+- **Provider-agnostic** — Ollama, OpenAI, OpenRouter, Anthropic, Gemini, Mistral, or
+  any OpenAI-compatible endpoint. No lock-in.
+- **Local-first** — one binary, your hardware, your model, your data, zero telemetry.
 
 The differentiator is the **coordination layer**: define agents with
 `depends_on`, and the event lattice cascades work through them automatically.
@@ -208,7 +212,7 @@ noted. See [`examples/`](examples/).
 git clone https://github.com/axocoatl/axocoatl
 cd axocoatl
 cargo build --release          # binary: target/release/axocoatl
-cargo test --workspace         # 415 tests
+cargo test --workspace         # 400+ tests
 ```
 
 ## License
