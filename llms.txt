@@ -1,10 +1,11 @@
-# Axocoatl — Rust-Native Agentic AI Framework
+# Axocoatl — Rust-Native Agentic AI Runtime
 > Coordination-first, actor-based, always-on agents in Rust
 
-Axocoatl is an open-source agentic AI framework for building self-coordinating
-multi-agent systems. Agents activate via stigmergic pheromone signals — no central
-orchestrator. Built on ractor actors with per-agent token budgets, 4-tier persistent
-memory, and checkpointing for crash recovery.
+Axocoatl is an open-source agentic runtime for building self-coordinating
+multi-agent systems. Top-level agents activate via stigmergic pheromone signals —
+no central orchestrator. Built on ractor actors with per-agent token budgets,
+four-tier memory, and checkpointing for crash recovery. Local-first: your
+hardware, your model, your data, zero telemetry.
 
 ## Quick Start
 
@@ -36,7 +37,9 @@ providers:
 
 ### CLI
 ```bash
-axocoatl init my-project          # Create project
+axocoatl onboard                   # Interactive setup wizard
+axocoatl doctor                    # Environment / dependency health check
+axocoatl init my-project           # Scaffold a project non-interactively
 axocoatl validate                  # Check config
 axocoatl dev                       # Development mode (IPC + HTTP)
 axocoatl serve                     # Production HTTP server
@@ -48,42 +51,67 @@ axocoatl workflow run <id> -i "…"  # Execute a workflow
 ## Core Concepts
 
 ### Agents
-Persistent ractor actors that process tasks. Each agent has: a provider (LLM), tools (MCP),
-memory (4-tier), and a token budget. Agents survive restarts via checkpointing.
+Persistent ractor actors that process tasks. Each agent has: a provider (LLM), tools
+(built-in and MCP-discovered), four-tier memory, and a token budget. A supervision
+loop restarts a crashed agent from its last checkpoint.
 
 ### Providers
-OpenAI, Anthropic, Ollama/LM Studio, Mistral, Gemini. Provider-agnostic — no vendor lock-in.
-Automatic fallback chains on rate limiting.
+Ollama, OpenAI, OpenRouter, Anthropic, Gemini, Mistral — six providers,
+provider-agnostic, no vendor lock-in. The OpenAI provider targets any
+OpenAI-compatible endpoint via `base_url` (LM Studio, MLX, vLLM), sending each
+agent's configured model per request.
 
 ### Workflows
 Multi-agent pipelines defined in YAML. Agents declare `depends_on` to form a DAG.
 Execution is driven by the EventLattice — no polling, no central scheduler.
 
 ### Coordination
-Stigmergic EventLattice: agents self-activate via pheromone signals with exponential decay.
-When an agent completes, it publishes a TaskCompleted event. Downstream agents accumulate
-signal until their threshold is crossed, then activate automatically with upstream outputs
-as context.
+Stigmergic EventLattice: top-level agents self-activate via pheromone signals with
+exponential decay. When an agent completes, it publishes a TaskCompleted event;
+downstream agents accumulate signal until their threshold is crossed, then activate
+with upstream outputs as context. No central orchestrator.
 
-- HTN symbolic planning decomposes compound tasks without LLM calls
-- Auction-based agent selection scores candidates by tool capability, load, and token budget
-- No central orchestrator — coordination emerges from the environment
+For work that needs runtime decomposition, an agent with `role: coordinator` breaks a
+goal into subtasks and assigns each to a spawned worker via a capability + budget
+auction, runs them in parallel, and synthesizes the results. Decomposition uses a
+symbolic HTN planner when an `htn_methods_file` is configured, otherwise the LLM. The
+coordinator is itself one lattice node, so the "no orchestrator" property holds
+between top-level agents. The pass is resumable via checkpointing.
 
-### Token Efficiency
-- TOON format: 20-35% fewer tokens than minified JSON for tabular data
-- Per-agent budgets with overflow policies (summarize/abort/warn)
-- Real-time cost tracking per provider
+### Token budgets
+Per-agent pre-flight token budgets. When a call would exceed the budget the policy is
+`abort` (default) or `warn`. Under context-window pressure the session is compacted
+automatically (summarized toward the model window); nothing is lost — the raw
+conversation stays in the daily log and semantic memory.
 
 ### Protocols
-- MCP: Connect to any MCP tool server. Expose agents as MCP tools.
-- A2A: Agent-to-Agent protocol (v1.0) for cross-framework interoperability.
+- MCP: connect to external stdio and streamable-HTTP MCP servers, discover their
+  tools, and call them over a persistent client. Axocoatl is also an MCP server
+  (`axocoatl mcp serve` exposes each agent as a tool).
+- A2A: inbound A2A server (`/.well-known/agent.json` + `/a2a/tasks`) that accepts
+  tasks from other agents. No outbound A2A client.
+- Webhooks: opt-in outbound event egress — the lattice POSTs signed events to
+  configured endpoints (the outbound counterpart to inbound A2A). A default install
+  makes no outbound webhook requests.
 
 ### Memory
-4-tier: session (in-memory) → daily log (JSONL) → long-term (bincode) → semantic (vector).
-Checkpointing after every LLM call for crash recovery.
+Four tiers plus checkpointing:
+- Session — the live conversation.
+- Daily log — append-only JSONL by date; lossless raw archive, readable by date range.
+- Core memory — named, agent-editable blocks (persona / human / project) rendered into
+  the prompt each turn; shareable across agents.
+- Semantic — on-device vector recall (all-MiniLM-L6-v2 via Candle); passive top-k
+  injection plus an agent-driven recall tool.
+
+A background "sleep-time" pass consolidates idle agents' memory (promotes durable facts
+into core blocks). Checkpointing snapshots the session to disk for crash recovery.
 
 ### Isolation
-Wasmtime WASM sandbox for tool execution with fuel metering.
+Each directory session runs its file/shell/terminal tools inside a rootless, hardened
+Podman container: only the session directory is bind-mounted, dangerous capabilities
+are dropped, `no-new-privileges` is set, and the network can be isolated. It bounds a
+misbehaving agent's blast radius; it is not a defense against prompt injection acting
+within the workspace.
 
 ## HTTP API
 
@@ -98,4 +126,4 @@ GET  /ws                                  # WebSocket streaming
 ```
 
 ## API Reference
-See: https://github.com/axocoatl-ai/axocoatl
+See: https://github.com/axocoatl/axocoatl
