@@ -383,8 +383,11 @@ pub struct ProviderCredentials {
     /// the server expects (usually `/v1`).
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Fallback provider/model identifier for the registry's fallback chain —
-    /// not a credential.
+    /// Opt-in rate-limit fallback, written as `"provider:model"` (e.g.
+    /// `"anthropic:claude-sonnet-4-6"`). If this provider returns a rate-limit
+    /// error, the request is retried once on the named backup provider using
+    /// that model. A bare `"provider"` uses the backup's own default model.
+    /// Not a credential.
     pub fallback: Option<String>,
 }
 
