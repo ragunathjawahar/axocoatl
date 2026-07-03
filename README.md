@@ -100,10 +100,12 @@ across runs.
 
 <p align="center"><img src="docs/img/memory.gif" alt="An agent stores a preference to core memory, then recalls it in a separate conversation" width="760"></p>
 
-**It never phones home.** Every socket the daemon opens is `127.0.0.1`; the only
-outbound call is your local model. Zero telemetry, zero external connections.
+**It never phones home.** Zero telemetry, no analytics, no accounts, no Axocoatl
+servers — nothing about you or your work is ever collected. The only outbound
+calls are the ones you can name: your model provider, and a one-time
+embedding-model download on first run. After that, air-gap it.
 
-<p align="center"><img src="docs/img/no-phone-home.gif" alt="A live lsof of the running daemon shows every socket is 127.0.0.1, with zero external connections" width="760"></p>
+<p align="center"><img src="docs/img/no-phone-home.gif" alt="A live lsof of the running daemon in steady state shows every socket is 127.0.0.1" width="760"></p>
 
 ---
 

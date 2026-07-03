@@ -372,10 +372,12 @@
         <figure style="margin:0;">
           <video src="/assets/demos/no-phone-home.mp4" autoplay loop muted playsinline preload="metadata"
             style="width:100%; height:auto; display:block; border-radius:var(--radius-lg); border:1px solid var(--border); box-shadow:var(--shadow-2);"
-            aria-label="A live lsof of the running daemon shows every socket is 127.0.0.1, with zero external connections"></video>
+            aria-label="A live lsof of the running daemon in steady state shows every socket is 127.0.0.1"></video>
           <figcaption class="muted small" style="margin-top:var(--s-3); line-height:1.6;">
-            <strong>Nothing phones home.</strong> Every socket is 127.0.0.1;
-            the only outbound call is your local model. Zero telemetry.
+            <strong>Nothing phones home.</strong> Zero telemetry, no analytics,
+            no Axocoatl servers — nothing about you is ever collected. The only
+            outbound calls are yours: your model provider, and a one-time
+            embedding-model download on first run.
           </figcaption>
         </figure>
 
