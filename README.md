@@ -201,7 +201,7 @@ noted. See [`examples/`](examples/).
 
 **Autonomy & config**
 - [`proactive-agents`](examples/proactive-agents) — agents that fire on a schedule or on an event (here, reacting to `AgentFailed`), not on a user prompt.
-- [`configs/`](examples/configs) — a gallery of minimal YAML configs for common recipes (research pipeline, feature dev, incident response, local-only, MCP). No Rust.
+- [`configs/`](examples/configs) — a gallery of minimal YAML configs for common recipes (research pipeline, feature dev, incident response, local-only, MCP, event webhooks). No Rust.
 
 **Foundations**
 - [`research-assistant`](examples/research-assistant), [`code-reviewer`](examples/code-reviewer), [`customer-support`](examples/customer-support) — agent coordination, token budgets, and session/checkpoint memory.

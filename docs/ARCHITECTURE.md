@@ -206,5 +206,5 @@ Report security issues per [SECURITY.md](../SECURITY.md).
 (providers) · `axocoatl-config` · `axocoatl-actor` (runtime) ·
 `axocoatl-memory` · `axocoatl-coordination` (lattice/HTN/auction) ·
 `axocoatl-graph` · `axocoatl-mcp` · `axocoatl-a2a` · `axocoatl-tools` ·
-`axocoatl-isolation` (WASM) · `axocoatl-daemon` · `axocoatl-server` ·
+`axocoatl-isolation` (Podman sandbox) · `axocoatl-daemon` · `axocoatl-server` ·
 `axocoatl-cli`.

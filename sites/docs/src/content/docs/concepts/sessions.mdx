@@ -25,7 +25,7 @@ Terminals pane at the bottom.
 From the CLI:
 
 ```sh
-axocoatl session new ./my-repo --mode single_agent --agent coder
+axocoatl session new ./my-repo --agent coder
 ```
 
 ## What the agent can do
@@ -66,6 +66,7 @@ files in Python; watch the bash terminal run them.
 
 `SessionMode::Lattice` runs *multiple agents* together inside one
 directory. The full lattice cascades work between them — exactly like a
-multi-agent workflow, but bounded to a folder. Currently this returns a
-clear "not yet available" message in v0.1 and is the post-launch
-fast-follow.
+multi-agent workflow, but bounded to a folder: the session runs the
+workflow's agents in dependency order, scoped and sandboxed to that
+folder. `session new` on the CLI creates single-agent sessions today, so
+lattice-mode sessions are created through the API or dashboard.

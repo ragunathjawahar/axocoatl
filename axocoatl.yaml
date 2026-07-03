@@ -163,11 +163,11 @@ schedules:
     input: "Summarize the latest developments in self-coordinating multi-agent AI systems."
     enabled: true
 
-# ─────────────────────────── GLYPHS ───────────────────────────
+# ─────────────────────────── SKILLS ───────────────────────────
 # Axocoatl's differentiator. Skills are lattice-aware units of capability:
 # they declare what events they emit and react to, so the lattice routes
 # work without manual wiring. Multiple agents can hold the same Skill;
-# the auction picks the best one for each invocation.
+# each reacts to the events it declares.
 
 skills:
   - id: code-review-checklist
