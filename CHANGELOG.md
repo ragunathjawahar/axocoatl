@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Per-agent sampling config.** Agents accept `temperature`, `top_p`,
+  `max_tokens`, and `response_format` in YAML, forwarded to the provider.
+- **Per-request overrides on agent execute.** `POST /api/agents/{id}/execute`
+  accepts optional `system_override` and `model_override` for a single call.
+- **Stateless per-request execution.** An isolated one-shot mode that runs a
+  request without persisting to the agent's session, memory, or checkpoints —
+  useful for evaluation.
+- **Outbound event webhooks.** The lattice can POST signed (HMAC-SHA256) events
+  to configured endpoints, with bounded retries and secret redaction. Opt-in —
+  a default install makes no outbound webhook requests.
+
+### Fixed
+- **Coordinator decomposition parsing** now tolerates the surrounding prose that
+  reasoning models emit around the JSON subtask list.
+- **macOS workspace build** for `axocoatl-isolation`.
+
 ## [0.1.4] — 2026-06-13
 
 ### Added

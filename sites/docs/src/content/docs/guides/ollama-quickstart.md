@@ -324,9 +324,9 @@ Expect: If session is restored from checkpoint, LLM may recall prior context.
 
 **7.3 — Sessions list**
 ```bash
-cargo run -p axocoatl-cli -- sessions list --agent assistant
+cargo run -p axocoatl-cli -- session list
 ```
-Expect: Lists checkpoint files with timestamps.
+Expect: Lists the active directory sessions (requires the daemon running).
 
 **7.4 — Checkpoint pruning**
 

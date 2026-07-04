@@ -47,18 +47,22 @@ Prefer Cargo? `cargo install axocoatl-cli` (requires Rust 1.82+).
 
 ## Why Axocoatl
 
-| Capability | Axocoatl | AutoAgents | CrewAI |
-|---|:--:|:--:|:--:|
-| Language / runtime | Rust / actors | Rust / actors | Python |
-| **Stigmergic coordination** (no orchestrator) | ✅ | ❌ | ❌ |
-| HTN symbolic planning | ✅ | ❌ | ❌ |
-| Auction-based agent selection | ✅ | ❌ | ❌ |
-| Per-agent token budgets | ✅ | ❌ | partial |
-| 4-tier persistent memory + checkpointing | ✅ | partial | partial |
-| MCP client + server | ✅ | partial | ✅ |
-| A2A protocol | ✅ | ❌ | ❌ |
-| Provider-agnostic (Ollama/OpenAI/Anthropic/…) | ✅ | ✅ | ✅ |
-| Interactive onboarding + `doctor` | ✅ | ❌ | ❌ |
+Most agent tooling is a framework you wire together and a cloud you rent.
+Axocoatl is a runtime you own:
+
+- **Stigmergic coordination, no orchestrator** — agents activate when their
+  dependencies complete, driven by pheromone-style signals. No central scheduler.
+- **A coordinator when you need one** — an agent can decompose a goal, auction the
+  subtasks to workers it spawns, and run them in parallel (symbolic HTN planning
+  when you provide methods, otherwise the LLM).
+- **Four-tier memory + checkpointing** — agents remember across runs and resume from
+  their last checkpoint after a crash.
+- **Per-agent token budgets** — enforced pre-flight, per agent.
+- **MCP client + server** — discover and call external MCP tools, and expose your own
+  agents as MCP tools. Inbound A2A too.
+- **Provider-agnostic** — Ollama, OpenAI, OpenRouter, Anthropic, Gemini, Mistral, or
+  any OpenAI-compatible endpoint. No lock-in.
+- **Local-first** — one binary, your hardware, your model, your data, zero telemetry.
 
 The differentiator is the **coordination layer**: define agents with
 `depends_on`, and the event lattice cascades work through them automatically.
@@ -100,10 +104,12 @@ across runs.
 
 <p align="center"><img src="docs/img/memory.gif" alt="An agent stores a preference to core memory, then recalls it in a separate conversation" width="760"></p>
 
-**It never phones home.** Every socket the daemon opens is `127.0.0.1`; the only
-outbound call is your local model. Zero telemetry, zero external connections.
+**It never phones home.** Zero telemetry, no analytics, no accounts, no Axocoatl
+servers — nothing about you or your work is ever collected. The only outbound
+calls are the ones you can name: your model provider, and a one-time
+embedding-model download on first run. After that, air-gap it.
 
-<p align="center"><img src="docs/img/no-phone-home.gif" alt="A live lsof of the running daemon shows every socket is 127.0.0.1, with zero external connections" width="760"></p>
+<p align="center"><img src="docs/img/no-phone-home.gif" alt="A live lsof of the running daemon in steady state shows every socket is 127.0.0.1" width="760"></p>
 
 ---
 
@@ -195,7 +201,7 @@ noted. See [`examples/`](examples/).
 
 **Autonomy & config**
 - [`proactive-agents`](examples/proactive-agents) — agents that fire on a schedule or on an event (here, reacting to `AgentFailed`), not on a user prompt.
-- [`configs/`](examples/configs) — a gallery of minimal YAML configs for common recipes (research pipeline, feature dev, incident response, local-only, MCP). No Rust.
+- [`configs/`](examples/configs) — a gallery of minimal YAML configs for common recipes (research pipeline, feature dev, incident response, local-only, MCP, event webhooks). No Rust.
 
 **Foundations**
 - [`research-assistant`](examples/research-assistant), [`code-reviewer`](examples/code-reviewer), [`customer-support`](examples/customer-support) — agent coordination, token budgets, and session/checkpoint memory.
@@ -206,7 +212,7 @@ noted. See [`examples/`](examples/).
 git clone https://github.com/axocoatl/axocoatl
 cd axocoatl
 cargo build --release          # binary: target/release/axocoatl
-cargo test --workspace         # 415 tests
+cargo test --workspace         # 400+ tests
 ```
 
 ## License

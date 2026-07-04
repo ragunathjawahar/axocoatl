@@ -7,10 +7,19 @@
 <!-- Favicon: the brand glyph in jade green, inlined as a data URI so it
      ships with the page (no extra HTTP round-trip). -->
 <link rel="icon" type="image/png" href="/brand/favicon.png" />
-<!-- Brand display face — Space Grotesk — wordmark + headings. -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<!-- Brand faces vendored locally under /vendor/fonts — no external font CDN, fully offline. -->
+<style>
+  @font-face {
+    font-family: 'Space Grotesk';
+    src: url('/vendor/fonts/space-grotesk-var.woff2') format('woff2');
+    font-weight: 300 700; font-style: normal; font-display: swap;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    src: url('/vendor/fonts/jetbrains-mono-var.woff2') format('woff2');
+    font-weight: 400 700; font-style: normal; font-display: swap;
+  }
+</style>
 <style>
   /* ─────────────────────────────────────────────────────────────────
      Theme variables. Default is dark. `[data-theme="light"]` on <html>

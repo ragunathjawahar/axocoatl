@@ -603,6 +603,69 @@ impl AxocoatlDaemon {
     // The full dependency stack a behavior may need is threaded explicitly
     // rather than bundled into a context struct — each is a distinct shared
     // handle and the call sites are few (bootstrap + restart).
+
+    /// The `fallback: "provider:model"` string declared on a provider's config,
+    /// if any. Only the registry providers carry a fallback field.
+    fn provider_fallback_spec<'a>(config: &'a AxocoatlConfig, name: &str) -> Option<&'a str> {
+        let p = &config.providers;
+        let creds = match name {
+            "openai" => p.openai.as_ref(),
+            "anthropic" => p.anthropic.as_ref(),
+            "gemini" => p.gemini.as_ref(),
+            "mistral" => p.mistral.as_ref(),
+            "openrouter" => p.openrouter.as_ref(),
+            _ => None,
+        }?;
+        creds.fallback.as_deref()
+    }
+
+    /// Resolve a provider's configured `fallback` into a concrete backup
+    /// provider + model. The spec is `"provider:model"`; a bare `"provider"`
+    /// uses that provider's own default model. Returns `None` (with a warning)
+    /// when nothing is configured or the backup provider isn't available.
+    fn resolve_fallback(
+        provider_name: &str,
+        config: &AxocoatlConfig,
+        registry: &ProviderRegistry,
+    ) -> Option<axocoatl_llm::FallbackTarget> {
+        let spec = Self::provider_fallback_spec(config, provider_name)?;
+        let (backup_name, backup_model) = match spec.split_once(':') {
+            Some((p, m)) => (p.trim(), Some(m.trim().to_string())),
+            None => (spec.trim(), None),
+        };
+        let provider: Arc<dyn axocoatl_llm::LlmProvider> = if backup_name == "ollama" {
+            let ollama = config.providers.ollama.as_ref()?;
+            let model = backup_model
+                .clone()
+                .or_else(|| ollama.model.clone())
+                .unwrap_or_else(|| "llama3.2".to_string());
+            Arc::new(axocoatl_llm_ollama::OllamaProvider::with_base_url(
+                &ollama.base_url,
+                &model,
+            ))
+        } else {
+            match registry.get(backup_name) {
+                Some(p) => p.clone(),
+                None => {
+                    tracing::warn!(
+                        provider = %provider_name,
+                        fallback = %backup_name,
+                        "fallback provider is not configured; ignoring fallback",
+                    );
+                    return None;
+                }
+            }
+        };
+        let model = backup_model.unwrap_or_else(|| provider.model_id().to_string());
+        tracing::info!(
+            provider = %provider_name,
+            fallback = %backup_name,
+            model = %model,
+            "provider rate-limit fallback enabled",
+        );
+        Some(axocoatl_llm::FallbackTarget { provider, model })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn spawn_agent(
         agent_yaml: &axocoatl_config::AgentConfigYaml,
@@ -649,6 +712,15 @@ impl AxocoatlDaemon {
                         provider_name, agent_id
                     ))
                 })?
+        };
+
+        // Opt-in rate-limit fallback: if this agent's provider declares a
+        // `fallback: "provider:model"`, wrap it so a rate-limited primary
+        // retries on the backup. No fallback configured -> unchanged provider.
+        let provider = match Self::resolve_fallback(provider_name, config, provider_registry) {
+            Some(target) => Arc::new(axocoatl_llm::FallbackProvider::new(provider, Some(target)))
+                as Arc<dyn axocoatl_llm::LlmProvider>,
+            None => provider,
         };
 
         // Select the behavior by role. A Coordinator orchestrates a pool of
@@ -874,11 +946,6 @@ impl AxocoatlDaemon {
                     }
                     None => tracing::info!("Registered OpenAI provider"),
                 }
-
-                // Set up fallback chain if configured
-                if let Some(fallback) = &openai.fallback {
-                    registry.set_fallback_chain("openai", vec![fallback.clone()]);
-                }
             }
         }
 
@@ -896,10 +963,6 @@ impl AxocoatlDaemon {
                 .with_provider_id("openrouter");
                 registry.register(Arc::new(provider));
                 tracing::info!("Registered OpenRouter provider");
-
-                if let Some(fallback) = &openrouter.fallback {
-                    registry.set_fallback_chain("openrouter", vec![fallback.clone()]);
-                }
             }
         }
 
